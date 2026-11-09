@@ -52,7 +52,7 @@ nav .links a:not(.cta-sm):hover { color: var(--ink); text-decoration: underline;
 
 /* hero */
 .hero { position: relative; min-height: 100svh; display: flex; flex-direction: column; justify-content: center; align-items: center; text-align: center; padding: 112px 24px 96px; overflow: hidden; isolation: isolate; }
-#hairs { position: absolute; inset: 0; width: 100%; height: 100%; z-index: -1; }
+#sheet { position: absolute; inset: 0; width: 100%; height: 100%; z-index: -1; }
 .hero-in { opacity: 0; transform: translateY(8px); transition: opacity .8s var(--ease), transform .8s var(--ease); }
 .ready .hero-in { opacity: 1; transform: none; }
 .kanji { font-family: var(--serif); font-size: 15px; color: var(--ink-2); margin-bottom: 24px; letter-spacing: .5em; padding-left: .5em; }
@@ -161,7 +161,6 @@ kbd { font-family: var(--mono); font-size: 12px; padding: 0 6px; border: 1px sol
 
 /* download */
 .download { margin: 128px 0 0; background: var(--sheet); border: 1px solid var(--hair); border-radius: 20px; padding: 64px 40px; text-align: center; position: relative; overflow: hidden; isolation: isolate; }
-.download canvas { position: absolute; inset: 0; width: 100%; height: 100%; z-index: -1; opacity: .7; }
 .download .sec-lead { margin: 16px auto 0; }
 .steps { text-align: left; max-width: 580px; margin: 40px auto 0; font-size: 14px; color: var(--ink-2); counter-reset: s; list-style: none; }
 .steps li { counter-increment: s; padding: 8px 0 8px 36px; position: relative; }
@@ -216,7 +215,7 @@ footer .h { width: 64px; height: 1px; background: var(--shu); margin: 0 auto 24p
 
 <main>
   <div class="hero" id="hero">
-    <canvas id="hairs" aria-hidden="true"></canvas>
+    <canvas id="sheet" aria-hidden="true"></canvas>
     <div class="hero-in">
       <p class="kanji" aria-label="紙、髪、神。どれも、かみ">紙・髪・神</p>
       <h1><em>髪</em>くらい軽い、<br><em>神</em>ブラウザー</h1>
@@ -307,7 +306,6 @@ footer .h { width: 64px; height: 1px; background: var(--shu); margin: 0 auto 24p
     </section>
 
     <div class="download" id="download">
-      <canvas id="hairs2" aria-hidden="true"></canvas>
       <h2>ダウンロード</h2>
       <p class="sec-lead">無料・オープンソース(MIT)。macOS 14 以降の Apple シリコン Mac に対応しています。</p>
       <div class="cta"><a class="btn primary" href="https://github.com/yuuyuu86/PaperBrowser/releases/latest/download/PaperBrowser.zip"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m0 0l-5-5m5 5l5-5M5 21h14"/></svg>PaperBrowser.zip(114 KB)</a></div>
@@ -340,7 +338,7 @@ cd PaperBrowser && ./build.sh</pre></div>
     const cur = document.documentElement.dataset.theme;
     const dark = cur ? cur === 'dark' : matchMedia('(prefers-color-scheme: dark)').matches;
     const next = dark ? 'light' : 'dark';
-    document.documentElement.dataset.theme = next; store.set('pb-theme', next);
+    document.documentElement.dataset.theme = next; store.set('pb-theme', next); dispatchEvent(new Event('themechange'));
   });
 
   /* one entrance on load */
@@ -358,75 +356,112 @@ cd PaperBrowser && ./build.sh</pre></div>
   addEventListener('scroll', () => { if (!ticking) { ticking = true; requestAnimationFrame(onScroll); } }, { passive: true });
   onScroll();
 
-  /* a single hair drifting on the air (rope simulation).
-     The root wanders slowly; the body follows as a soft rope and streams sideways on a breeze.
-     The cursor nudges it away. */
-  function floatingHair(canvas, { color, segs = 46, len = 380, width = 1.6, speed = 1 }) {
+  /* one sheet of washi falls once and comes to rest in the empty space of the hero.
+     While it falls, the cursor is a breeze. A click picks it up and drops it again from there. */
+  function fallingSheet(canvas) {
     const ctx = canvas.getContext('2d');
-    let W = 0, H = 0, raf = 0, visible = true, t = Math.random() * 100;
-    const pts = [], seg = () => len * Math.min(1, W / 900 + .35) / segs;
-    const mouse = { x: -1e4, y: -1e4, vx: 0, vy: 0, px: null, py: null };
-    const n = (a, s) => Math.sin(a + s) * .5 + Math.sin(a * 2.3 + s * 1.7) * .3 + Math.sin(a * 4.1 + s * .3) * .2;
+    let W = 0, H = 0, raf = 0, s = null, rest = null, fibres = null;
+    const mouse = { x: -1e4, y: -1e4, vx: 0, px: null };
+    const size = () => W > 760 ? Math.min(200, W * .16) : Math.max(72, Math.min(110, W * .26));
+    function makeFibres(w, h) {
+      // a few faint fibres baked once, so the sheet reads as washi rather than a flat card
+      const c = document.createElement('canvas'), d = Math.min(devicePixelRatio || 1, 2);
+      c.width = w * d; c.height = h * d; const g = c.getContext('2d'); g.scale(d, d);
+      let seed = 7; const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+      g.strokeStyle = css('--ink'); g.lineCap = 'round';
+      for (let i = 0; i < 70; i++) {
+        const x = rnd() * w, y = rnd() * h, a = rnd() * Math.PI, l = 4 + rnd() * 14;
+        g.globalAlpha = .03 + rnd() * .05; g.lineWidth = .5;
+        g.beginPath(); g.moveTo(x, y); g.quadraticCurveTo(x + Math.cos(a) * l * .5 + 2, y + Math.sin(a) * l * .5, x + Math.cos(a) * l, y + Math.sin(a) * l); g.stroke();
+      }
+      return c;
+    }
+    function restingSpot() {
+      // the empty band below the hero copy; right of centre on wide screens
+      const cta = $('.hero .req').getBoundingClientRect(), r = canvas.getBoundingClientRect();
+      const h = size() * 1.3, below = cta.bottom - r.top;
+      const floor = Math.min(H - h / 2 - 24, below + (H - below) * .5);
+      return { x: W > 760 ? W * .72 : W * .5, y: Math.max(below + h / 2 + 16, floor), angle: -.12 };
+    }
+    function drop(x, y) {
+      s = { x, y, vx: 0, vy: .6, phase: Math.random() * 6.28, spin: (Math.random() < .5 ? -1 : 1) * (.02 + Math.random() * .01), angle: 0, flip: 1, landed: false };
+      if (!raf) raf = requestAnimationFrame(frame);
+    }
     function resize() {
       const r = canvas.getBoundingClientRect(), dpr = Math.min(devicePixelRatio || 1, 2);
       W = r.width; H = r.height; canvas.width = W * dpr; canvas.height = H * dpr; ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-      if (!pts.length) for (let i = 0; i < segs; i++) { const x = W * .6 - i * seg(), y = H * .3 + Math.sin(i * .3) * 20; pts.push({ x, y, ox: x, oy: y }); }
-      if (reduce) { for (let k = 0; k < 240; k++) step(); draw(); }
+      fibres = makeFibres(size(), size() * 1.3);
+      rest = restingSpot();
+      if (!s) { if (reduce) { s = { ...rest, flip: 1, landed: true, vx: 0, vy: 0 }; } else drop(W * .62, -size()); }
+      else if (s.landed) { s.x = rest.x; s.y = rest.y; s.angle = rest.angle; }
+      draw();
     }
     function step() {
-      t += .006 * speed;
-      const head = pts[0];
-      const tx = W * (.62 + n(t * .9, 1.3) * .3), ty = H * (.45 + n(t * 1.1, 4.2) * .32);
-      head.x += (tx - head.x) * .02; head.y += (ty - head.y) * .02;
-      const R2 = 160 * 160;
-      for (let i = 1; i < pts.length; i++) {
-        const p = pts[i]; let vx = (p.x - p.ox) * .975, vy = (p.y - p.oy) * .975;
-        vx -= .012; vy -= .001;
-        vx += n(t * 3 + i * .15, 7) * .008; vy += n(t * 2.6 + i * .12, 2) * .008;
-        const dx = p.x - mouse.x, dy = p.y - mouse.y, d2 = dx * dx + dy * dy;
-        if (d2 < R2) { const f = 1 - d2 / R2; vx += mouse.vx * f * .06 + dx / 160 * f * .25; vy += mouse.vy * f * .06 + dy / 160 * f * .25; }
-        p.ox = p.x; p.oy = p.y; p.x += vx; p.y += vy;
+      if (s.landed) return false;
+      s.phase += .05;
+      // falling-leaf motion: glide side to side, tilt with the glide, slow down at each turn
+      const glide = Math.cos(s.phase);
+      s.vx += (glide * 2.2 - s.vx) * .06 + mouse.vx * .015 * Math.max(0, 1 - Math.hypot(mouse.x - s.x, mouse.y - s.y) / 260);
+      s.vy += ((1.6 + Math.abs(Math.sin(s.phase)) * 1.4) - s.vy) * .06;
+      s.x += s.vx; s.y += s.vy;
+      s.angle = glide * .45 + s.spin * s.phase * .2;
+      s.flip = .55 + .45 * Math.abs(Math.cos(s.phase * .5));   // the sheet turns in depth as it falls
+      mouse.vx *= .9;
+      // ease into the resting spot once it reaches that height
+      if (s.y >= rest.y - 2) {
+        s.y += (rest.y - s.y) * .2; s.x += (rest.x - s.x) * .06; s.angle += (rest.angle - s.angle) * .12; s.flip += (1 - s.flip) * .15; s.vx *= .8;
+        if (Math.abs(rest.x - s.x) < .5 && Math.abs(rest.angle - s.angle) < .003 && 1 - s.flip < .003) { Object.assign(s, rest, { flip: 1, landed: true }); }
       }
-      head.ox = head.x; head.oy = head.y;
-      mouse.vx *= .85; mouse.vy *= .85;
-      const L = seg();
-      for (let k = 0; k < 6; k++) {
-        for (let i = 1; i < pts.length; i++) {
-          const a = pts[i - 1], b = pts[i], dx = b.x - a.x, dy = b.y - a.y, d = Math.hypot(dx, dy) || 1, diff = (d - L) / d;
-          if (i === 1) { b.x -= dx * diff; b.y -= dy * diff; } else { a.x += dx * diff * .5; a.y += dy * diff * .5; b.x -= dx * diff * .5; b.y -= dy * diff * .5; }
-        }
-        for (let i = 2; i < pts.length; i++) {
-          const a = pts[i - 2], b = pts[i], dx = b.x - a.x, dy = b.y - a.y, d = Math.hypot(dx, dy) || 1;
-          if (d < L * 1.9) { const push = (L * 1.9 - d) / d * .18; b.x += dx * push; b.y += dy * push; }
-        }
-      }
-      for (const p of pts) { if (p.x < -40) p.x += (-40 - p.x) * .1; if (p.x > W + 40) p.x -= (p.x - W - 40) * .1; if (p.y < 10) p.y += (10 - p.y) * .1; if (p.y > H - 10) p.y -= (p.y - H + 10) * .1; }
+      return true;
     }
     function draw() {
       ctx.clearRect(0, 0, W, H);
-      ctx.strokeStyle = color(); ctx.lineCap = 'round'; ctx.lineJoin = 'round';
-      for (let i = 1; i < pts.length - 1; i++) {
-        const a = pts[i - 1], b = pts[i], c = pts[i + 1], k = 1 - i / pts.length;
-        ctx.globalAlpha = .35 + k * .65; ctx.lineWidth = .35 + width * k;
-        ctx.beginPath(); ctx.moveTo((a.x + b.x) / 2, (a.y + b.y) / 2);
-        ctx.quadraticCurveTo(b.x, b.y, (b.x + c.x) / 2, (b.y + c.y) / 2); ctx.stroke();
-      }
-      ctx.globalAlpha = 1;
+      if (!s) return;
+      const w = size(), h = w * 1.3, lift = Math.max(0, rest.y - s.y);
+      // shadow on the "floor": wide and faint while high, tight as it lands
+      const sh = Math.min(1, lift / 400);
+      ctx.save();
+      ctx.translate(s.x + 6 + sh * 30, rest.y + h * .45);
+      ctx.scale(1, .18);
+      const grad = ctx.createRadialGradient(0, 0, 0, 0, 0, w * (.7 + sh * .6));
+      grad.addColorStop(0, `rgba(0,0,0,${.16 * (1 - sh * .8)})`); grad.addColorStop(1, 'rgba(0,0,0,0)');
+      ctx.fillStyle = grad; ctx.beginPath(); ctx.arc(0, 0, w * (.7 + sh * .6), 0, 6.283); ctx.fill();
+      ctx.restore();
+      // the sheet
+      ctx.save();
+      ctx.translate(s.x, s.y); ctx.rotate(s.angle); ctx.scale(1, s.flip);
+      const shade = 1 - (1 - s.flip) * .5;                    // facing away = a little darker
+      ctx.shadowColor = 'rgba(0,0,0,.12)'; ctx.shadowBlur = 8; ctx.shadowOffsetY = 2;
+      ctx.fillStyle = css('--sheet'); ctx.beginPath(); ctx.roundRect(-w / 2, -h / 2, w, h, 2); ctx.fill();
+      ctx.shadowColor = 'transparent';
+      if (shade < 1) { ctx.fillStyle = `rgba(0,0,0,${(1 - shade) * .35})`; ctx.fill(); }
+      ctx.drawImage(fibres, -w / 2, -h / 2, w, h);
+      ctx.strokeStyle = css('--hair'); ctx.lineWidth = 1; ctx.stroke();
+      // a small vermilion seal in the corner
+      const k = w * .14;
+      ctx.fillStyle = css('--shu'); ctx.globalAlpha = .9;
+      ctx.beginPath(); ctx.roundRect(w / 2 - k - w * .1, h / 2 - k - w * .1, k, k, 2); ctx.fill();
+      ctx.globalAlpha = 1; ctx.fillStyle = css('--sheet');
+      ctx.font = `600 ${k * .72}px ${css('--serif')}`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText('紙', w / 2 - k / 2 - w * .1, h / 2 - k / 2 - w * .1 + k * .04);
+      ctx.restore();
     }
-    function frame() { step(); draw(); raf = visible ? requestAnimationFrame(frame) : 0; }
+    function frame() { const moving = step(); draw(); raf = moving ? requestAnimationFrame(frame) : 0; }
     const host = canvas.parentElement;
     host.addEventListener('pointermove', e => {
-      const r = canvas.getBoundingClientRect(), x = e.clientX - r.left, y = e.clientY - r.top;
-      if (mouse.px !== null) { mouse.vx = mouse.vx * .5 + (x - mouse.px) * .5; mouse.vy = mouse.vy * .5 + (y - mouse.py) * .5; }
-      mouse.px = mouse.x = x; mouse.py = mouse.y = y;
+      const r = canvas.getBoundingClientRect(), x = e.clientX - r.left;
+      if (mouse.px !== null) mouse.vx = mouse.vx * .5 + (x - mouse.px) * .5;
+      mouse.px = mouse.x = x; mouse.y = e.clientY - r.top;
     });
-    host.addEventListener('pointerleave', () => { mouse.x = mouse.y = -1e4; mouse.px = mouse.py = null; });
+    host.addEventListener('pointerleave', () => { mouse.x = mouse.y = -1e4; mouse.px = null; });
+    host.addEventListener('click', e => {
+      if (reduce || e.target.closest('a,button')) return;
+      const r = canvas.getBoundingClientRect(); drop(Math.min(W - 80, Math.max(80, e.clientX - r.left)), -size());
+    });
     new ResizeObserver(resize).observe(canvas);
-    if (!reduce) new IntersectionObserver(([en]) => { visible = en.isIntersecting; if (visible && !raf) raf = requestAnimationFrame(frame); }).observe(canvas);
-    resize();
+    addEventListener('themechange', resize);
   }
-  floatingHair($('#hairs'), { color: () => css('--shu'), segs: 60, len: 620, width: 2 });
-  floatingHair($('#hairs2'), { color: () => css('--shu'), segs: 48, len: 460, width: 1.6, speed: .8 });
+  fallingSheet($('#sheet'));
 
   /* size comparison */
   const fmt = kb => kb >= 1000 ? `${kb / 1000} MB` : `${kb} KB`;
