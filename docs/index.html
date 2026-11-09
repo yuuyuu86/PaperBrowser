@@ -54,7 +54,7 @@ nav .links a:not(.pill):hover::after { transform: scaleX(1); transform-origin: l
 .hero { position: relative; min-height: 100svh; display: flex; flex-direction: column; justify-content: center; align-items: center; text-align: center; padding: 120px 24px 90px; overflow: hidden; isolation: isolate; }
 #hairs { position: absolute; inset: 0; width: 100%; height: 100%; z-index: -1; }
 .hero::after { content: ""; position: absolute; inset: 0; z-index: -1; pointer-events: none;
-  background: radial-gradient(ellipse 55% 45% at 50% 45%, var(--paper) 25%, transparent 75%); opacity: .85; }
+  background: radial-gradient(ellipse 55% 45% at 50% 45%, var(--paper) 25%, transparent 75%); opacity: .35; }
 .glow { position: absolute; width: 560px; height: 560px; border-radius: 50%; background: radial-gradient(circle, var(--shu-soft), transparent 65%); left: 50%; top: 50%; transform: translate(-50%,-50%); z-index: -1; pointer-events: none; transition: transform .8s var(--ease); }
 .kicker { display: inline-flex; align-items: center; gap: 12px; font-size: 13px; color: var(--faint); margin-bottom: 26px; }
 .kicker button { font-family: var(--serif); font-size: 15px; padding: 2px 6px; border-radius: 4px; transition: color .2s, background .2s; }
@@ -209,7 +209,7 @@ kbd { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px; p
 
 /* download (always dark ink card) */
 .download { --c: #F4EFE6; margin: 120px 0 0; background: #1F1D1A; color: var(--c); border-radius: 24px; padding: 80px 40px; text-align: center; position: relative; overflow: hidden; isolation: isolate; }
-.download canvas { position: absolute; inset: 0; width: 100%; height: 100%; z-index: -1; opacity: .55; }
+.download canvas { position: absolute; inset: 0; width: 100%; height: 100%; z-index: -1; opacity: .8; }
 .download .sec-kicker { justify-content: center; color: #F0604A; }
 .download .sec-kicker::before { background: #F0604A; }
 .download h2 { font-size: clamp(32px, 5.4vw, 60px); }
@@ -295,7 +295,7 @@ footer .big:hover { -webkit-text-stroke-color: var(--shu); opacity: 1; }
     </div>
     <p class="req">無料・オープンソース ・ macOS 14 以降 ・ Apple シリコン</p>
     <a class="scroll-cue" href="#light">SCROLL<i></i></a>
-    <div class="hint">髪をなでてみて — クリックで、ふっと吹く</div>
+    <div class="hint">一本の髪が、漂っています — なでると逃げて、クリックで ふっ</div>
   </div>
 
   <div class="marquee" aria-hidden="true"><div class="track" id="mq"></div></div>
@@ -453,65 +453,90 @@ cd PaperBrowser && ./build.sh</pre></div>
   const words = ['288KB', '縦タブ', 'タブの自動休止', '広告ブロック', 'HTTPS優先', 'サンドボックス', 'ライブラリゼロ', '紙・髪・神'];
   $('#mq').innerHTML = [...words, ...words].map(w => `<span>${w}</span>`).join('');
 
-  /* ---------- hair field (canvas): strands sway, follow the cursor, scatter on click ---------- */
-  function hairField(canvas, { count, accent, ink }) {
+  /* ---------- a single hair drifting on the air (canvas rope simulation) ----------
+     The head wanders along a slow, smooth path; the body follows as a soft rope,
+     so it curls and flows like a real strand. The cursor is a gentle breeze; a click is a puff. */
+  function floatingHair(canvas, { color, segs = 46, len = 380, width = 1.6, speed = 1 }) {
     const ctx = canvas.getContext('2d');
-    let W = 0, H = 0, strands = [], t = 0, raf = 0, visible = true;
-    const mouse = { x: -9999, y: -9999, vx: 0, px: null };
-    let gust = 0, gustX = 0, gustY = 0;
+    let W = 0, H = 0, raf = 0, visible = true, t = Math.random() * 100;
+    const pts = [], seg = () => len * Math.min(1, W / 900 + .35) / segs;
+    const mouse = { x: -1e4, y: -1e4, vx: 0, vy: 0, px: null, py: null };
+    let gust = { x: 0, y: 0, power: 0 };
+    // smooth pseudo-noise from layered sines (deterministic, cheap)
+    const n = (a, s) => Math.sin(a * 1.0 + s) * .5 + Math.sin(a * 2.3 + s * 1.7) * .3 + Math.sin(a * 4.1 + s * .3) * .2;
     function resize() {
       const r = canvas.getBoundingClientRect(), dpr = Math.min(devicePixelRatio || 1, 2);
       W = r.width; H = r.height; canvas.width = W * dpr; canvas.height = H * dpr; ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-      const n = Math.max(30, Math.round(count * Math.min(1, W / 1200)));
-      strands = Array.from({ length: n }, (_, i) => ({
-        x: (i + Math.random()) / n * W, base: H * (.7 + Math.random() * .4), len: H * (.25 + Math.random() * .5),
-        phase: Math.random() * 6.28, speed: .3 + Math.random() * .6, sway: 10 + Math.random() * 26,
-        bend: 0, vb: 0, w: .5 + Math.random() * .9, a: .15 + Math.random() * .45, hot: Math.random() < .12,
-      }));
-      if (reduce) draw();
+      if (!pts.length) for (let i = 0; i < segs; i++) { const x = W * .3 - i * seg(), y = H * .35 + Math.sin(i * .3) * 20; pts.push({ x, y, ox: x, oy: y }); }
+      if (reduce) { for (let k = 0; k < 240; k++) step(); draw(); }
+    }
+    function step() {
+      t += .006 * speed;
+      // head target wanders across the canvas, staying within a soft margin
+      const head = pts[0];
+      const tx = W * (.62 + n(t * .9, 1.3) * .3), ty = H * (.45 + n(t * 1.1, 4.2) * .32);
+      head.x += (tx - head.x) * .02; head.y += (ty - head.y) * .02;
+      // breeze from cursor and puff from clicks push every point
+      const len2 = 160 * 160;
+      for (let i = 1; i < pts.length; i++) {
+        const p = pts[i]; let vx = (p.x - p.ox) * .975, vy = (p.y - p.oy) * .975;
+        vx -= .012; vy -= .001;                       // weightless: a soft breeze streams it sideways
+        vx += n(t * 3 + i * .15, 7) * .008;            // ambient air
+        vy += n(t * 2.6 + i * .12, 2) * .008;
+        const dx = p.x - mouse.x, dy = p.y - mouse.y, d2 = dx * dx + dy * dy;
+        if (d2 < len2) { const f = (1 - d2 / len2); vx += mouse.vx * f * .06 + dx / 160 * f * .25; vy += mouse.vy * f * .06 + dy / 160 * f * .25; }
+        if (gust.power > .01) { const gx = p.x - gust.x, gy = p.y - gust.y, gd = Math.hypot(gx, gy) || 1, f = gust.power * Math.max(0, 1 - gd / 600);
+          vx += gx / gd * f * 2.2; vy += gy / gd * f * 2.2; }
+        p.ox = p.x; p.oy = p.y; p.x += vx; p.y += vy;
+      }
+      head.ox = head.x; head.oy = head.y;
+      gust.power *= .92; mouse.vx *= .85; mouse.vy *= .85;
+      // rope constraints (a few relaxation passes) + a little stiffness so it curls instead of kinking
+      const L = seg();
+      for (let k = 0; k < 6; k++) {
+        for (let i = 1; i < pts.length; i++) {
+          const a = pts[i - 1], b = pts[i], dx = b.x - a.x, dy = b.y - a.y, d = Math.hypot(dx, dy) || 1, diff = (d - L) / d;
+          if (i === 1) { b.x -= dx * diff; b.y -= dy * diff; } else { a.x += dx * diff * .5; a.y += dy * diff * .5; b.x -= dx * diff * .5; b.y -= dy * diff * .5; }
+        }
+        for (let i = 2; i < pts.length; i++) {
+          const a = pts[i - 2], b = pts[i], dx = b.x - a.x, dy = b.y - a.y, d = Math.hypot(dx, dy) || 1;
+          if (d < L * 1.9) { const push = (L * 1.9 - d) / d * .18; b.x += dx * push; b.y += dy * push; }
+        }
+      }
+      // keep the whole strand on screen softly
+      for (const p of pts) { if (p.x < -40) p.x += (-40 - p.x) * .1; if (p.x > W + 40) p.x -= (p.x - W - 40) * .1; if (p.y < 10) p.y += (10 - p.y) * .1; if (p.y > H - 10) p.y -= (p.y - H + 10) * .1; }
     }
     function draw() {
       ctx.clearRect(0, 0, W, H);
-      const shu = accent(), col = ink();
-      for (const s of strands) {
-        const sw = Math.sin(t * s.speed + s.phase) * s.sway + s.bend;
-        const near = Math.max(0, 1 - Math.hypot(mouse.x - s.x, mouse.y - (s.base - s.len * .6)) / 180);
-        ctx.beginPath(); ctx.moveTo(s.x, s.base);
-        ctx.quadraticCurveTo(s.x + sw * .35, s.base - s.len * .5, s.x + sw, s.base - s.len + Math.abs(s.bend) * .2);
-        ctx.strokeStyle = s.hot ? shu : col;
-        ctx.globalAlpha = s.hot ? Math.min(1, s.a + .35 + near * .4) : s.a * .5 + near * .3;
-        ctx.lineWidth = s.w; ctx.lineCap = 'round'; ctx.stroke();
+      ctx.strokeStyle = color(); ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+      // tapered stroke: thick at the root (head), fine at the tip
+      for (let i = 1; i < pts.length - 1; i++) {
+        const a = pts[i - 1], b = pts[i], c = pts[i + 1];
+        const k = 1 - i / pts.length;
+        ctx.globalAlpha = .35 + k * .65;
+        ctx.lineWidth = .35 + width * k;
+        ctx.beginPath();
+        ctx.moveTo((a.x + b.x) / 2, (a.y + b.y) / 2);
+        ctx.quadraticCurveTo(b.x, b.y, (b.x + c.x) / 2, (b.y + c.y) / 2);
+        ctx.stroke();
       }
       ctx.globalAlpha = 1;
     }
-    function frame() {
-      t += 1 / 60; mouse.vx *= .9; gust *= .965;
-      for (const s of strands) {
-        const near = Math.max(0, 1 - Math.hypot(mouse.x - s.x, mouse.y - (s.base - s.len * .6)) / 180);
-        let force = near * mouse.vx * .9;
-        if (gust > .01) {
-          const gd = Math.max(0, 1 - Math.hypot(gustX - s.x, gustY - (s.base - s.len * .5)) / 520);
-          force += gust * gd * (s.x >= gustX ? 1 : -1) * 55;
-        }
-        s.vb = (s.vb + force - s.bend * .04) * .88; s.bend += s.vb * .12;
-      }
-      draw();
-      raf = visible ? requestAnimationFrame(frame) : 0;
-    }
+    function frame() { step(); draw(); raf = visible ? requestAnimationFrame(frame) : 0; }
     const host = canvas.parentElement;
     host.addEventListener('pointermove', e => {
-      const r = canvas.getBoundingClientRect(), x = e.clientX - r.left;
-      if (mouse.px !== null) mouse.vx = mouse.vx * .6 + (x - mouse.px) * .4;
-      mouse.px = x; mouse.x = x; mouse.y = e.clientY - r.top;
+      const r = canvas.getBoundingClientRect(), x = e.clientX - r.left, y = e.clientY - r.top;
+      if (mouse.px !== null) { mouse.vx = mouse.vx * .5 + (x - mouse.px) * .5; mouse.vy = mouse.vy * .5 + (y - mouse.py) * .5; }
+      mouse.px = mouse.x = x; mouse.py = mouse.y = y;
     });
-    host.addEventListener('pointerleave', () => { mouse.x = mouse.y = -9999; mouse.px = null; });
+    host.addEventListener('pointerleave', () => { mouse.x = mouse.y = -1e4; mouse.px = mouse.py = null; });
     new ResizeObserver(resize).observe(canvas);
     if (!reduce) new IntersectionObserver(([en]) => { visible = en.isIntersecting; if (visible && !raf) raf = requestAnimationFrame(frame); }).observe(canvas);
     resize();
-    return { blow(x, y) { gust = 1; gustX = x; gustY = y; }, redraw: draw };
+    return { blow(x, y) { gust = { x, y, power: 1 }; } };
   }
-  const heroHairs = hairField($('#hairs'), { count: 150, accent: () => css('--shu'), ink: () => css('--ink') });
-  const dlHairs = hairField($('#hairs2'), { count: 90, accent: () => '#F0604A', ink: () => '#F4EFE6' });
+  const heroHairs = floatingHair($('#hairs'), { color: () => css('--shu'), segs: 60, len: 620, width: 2 });
+  const dlHairs = floatingHair($('#hairs2'), { color: () => '#F0604A', segs: 48, len: 460, width: 1.6, speed: .8 });
   $('#hero').addEventListener('click', e => {
     if (e.target.closest('a,button,.ch')) return;
     const r = $('#hairs').getBoundingClientRect(); heroHairs.blow(e.clientX - r.left, e.clientY - r.top);
