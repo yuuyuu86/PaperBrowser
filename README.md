@@ -1,9 +1,14 @@
 # PaperBrowser
 
-A tiny, secure WebKit browser for macOS — **~124 KB app**, one Swift file, zero dependencies.
+A tiny, secure WebKit browser for macOS — **~150 KB app**, one Swift file, zero dependencies.
 
 ## Features
 Tabs (native macOS tabs), windows, private windows, address bar with search (DuckDuckGo), back/forward/reload, swipe gestures, find in page, zoom, full screen, print, downloads (to ~/Downloads), file upload, popups, JS dialogs, camera/mic with permission prompt, opening http(s) links from other apps.
+
+## Lightweight by design
+- Background tabs unused for 5 minutes are unloaded (restored when you switch back)
+- On system memory pressure, all background tabs are unloaded immediately
+- Built-in ad/tracker blocking (`Resources/blocklist.txt`, third-party requests only)
 
 ## Security
 - App Sandbox + Hardened Runtime

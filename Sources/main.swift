@@ -26,6 +26,20 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSTex
     let lock = NSImageView()
     private var observers: [NSKeyValueObservation] = []
     let isPrivate: Bool
+    var lastActive = Date()
+    private(set) var suspendedURL: URL?
+
+    /// Unloads the page so WebKit can free its content process; restored when the tab is shown again.
+    func suspend() {
+        guard suspendedURL == nil, let u = webView.url, u.scheme != "about", !webView.isLoading else { return }
+        suspendedURL = u
+        webView.loadHTMLString("", baseURL: nil)
+    }
+    func resumeIfNeeded() {
+        lastActive = Date()
+        guard let u = suspendedURL else { return }
+        suspendedURL = nil; load(u)
+    }
 
     init(configuration: WKWebViewConfiguration? = nil, isPrivate: Bool = false) {
         self.isPrivate = isPrivate
@@ -52,6 +66,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSTex
         c.preferences.javaScriptCanOpenWindowsAutomatically = false
         c.upgradeKnownHostsToHTTPS = true
         c.defaultWebpagePreferences.preferredContentMode = .desktop
+        if let rules = AppDelegate.shared.blockRules { c.userContentController.add(rules) }
         c.applicationNameForUserAgent = "Version/26.0 Safari/605.1.15"
         return c
     }
@@ -104,6 +119,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSTex
                 self?.progress.isHidden = v.estimatedProgress >= 1
             },
             w.observe(\.title) { [weak self] v, _ in
+                if self?.suspendedURL != nil { return }
                 let t = v.title?.isEmpty == false ? v.title! : "New Tab"
                 self?.window?.title = (self?.isPrivate == true ? "🔒 " : "") + t
             },
@@ -122,6 +138,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSTex
     }
 
     private func syncAddress() {
+        if suspendedURL != nil { return }
         if window?.firstResponder != address.currentEditor() { address.stringValue = webView.url?.absoluteString ?? "" }
         let secure = webView.url?.scheme == "https" && webView.hasOnlySecureContent
         lock.image = webView.url == nil ? nil : NSImage(systemSymbolName: secure ? "lock.fill" : "exclamationmark.triangle.fill", accessibilityDescription: nil)
@@ -250,6 +267,8 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSTex
         a.beginSheetModal(for: window!) { decisionHandler($0 == .alertSecondButtonReturn ? .grant : .deny) }
     }
 
+    func windowDidBecomeKey(_ n: Notification) { resumeIfNeeded() }
+    func windowDidResignKey(_ n: Notification) { lastActive = Date() }
     func controlTextDidEndEditing(_ n: Notification) { syncAddress() }
     func windowWillClose(_ n: Notification) {
         webView.stopLoading(); observers.removeAll()
@@ -260,12 +279,49 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSTex
 final class AppDelegate: NSObject, NSApplicationDelegate {
     static let shared = AppDelegate()
     var windows: [BrowserWindowController] = []
+    var blockRules: WKContentRuleList?
+    private var memorySource: DispatchSourceMemoryPressure?
+    static let suspendAfter: TimeInterval = 5 * 60
+
+    private func suspendBackground(olderThan age: TimeInterval) {
+        let key = NSApp.keyWindow
+        for c in windows where c.window !== key && Date().timeIntervalSince(c.lastActive) >= age { c.suspend() }
+    }
+    private func startMemoryManagement() {
+        Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
+            self?.suspendBackground(olderThan: AppDelegate.suspendAfter)
+        }
+        let src = DispatchSource.makeMemoryPressureSource(eventMask: [.warning, .critical], queue: .main)
+        src.setEventHandler { [weak self] in self?.suspendBackground(olderThan: 0) }
+        src.resume(); memorySource = src
+    }
+    /// Compiles the bundled block list (ads/trackers) once; WebKit caches the compiled form on disk.
+    private func loadBlocker(then done: @escaping () -> Void) {
+        guard let url = Bundle.main.url(forResource: "blocklist", withExtension: "txt"),
+              let text = try? String(contentsOf: url, encoding: .utf8) else { return done() }
+        let domains = text.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty && !$0.hasPrefix("#") }
+        let hostRules = domains.map { d -> [String: Any] in
+            let esc = NSRegularExpression.escapedPattern(for: d)
+            return ["trigger": ["url-filter": "^https?://([^/]+\\.)?\(esc)[:/]", "load-type": ["third-party"]],
+                    "action": ["type": "block"]]
+        }
+        guard let data = try? JSONSerialization.data(withJSONObject: hostRules), let json = String(data: data, encoding: .utf8) else { return done() }
+        let version = "blk-" + String(text.utf8.reduce(UInt64(5381)) { ($0 &* 33) ^ UInt64($1) }, radix: 36)
+        WKContentRuleListStore.default().lookUpContentRuleList(forIdentifier: version) { [weak self] cached, _ in
+            if let cached { self?.blockRules = cached; return done() }
+            WKContentRuleListStore.default().compileContentRuleList(forIdentifier: version, encodedContentRuleList: json) { list, err in
+                if let err { NSLog("blocklist: \(err)") }
+                self?.blockRules = list; done()
+            }
+        }
+    }
     var current: BrowserWindowController? { NSApp.keyWindow?.windowController as? BrowserWindowController }
 
     func applicationDidFinishLaunching(_ n: Notification) {
         buildMenu()
-        newWindow(nil)
-        NSApp.activate()
+        startMemoryManagement()
+        loadBlocker { [weak self] in self?.newWindow(nil); NSApp.activate() }
     }
     func applicationShouldTerminateAfterLastWindowClosed(_ s: NSApplication) -> Bool { true }
     func application(_ app: NSApplication, open urls: [URL]) {
