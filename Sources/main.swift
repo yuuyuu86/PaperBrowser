@@ -100,6 +100,12 @@ final class Tab: NSObject, WKNavigationDelegate, WKUIDelegate, WKDownloadDelegat
         c.upgradeKnownHostsToHTTPS = true
         c.defaultWebpagePreferences.preferredContentMode = .desktop
         if let rules = AppDelegate.shared.blockRules { c.userContentController.add(rules) }
+        let d = UserDefaults.standard
+        // Lightweight defaults (each can be turned off with `defaults write dev.yuuyuu86.PaperBrowser <key> -bool NO`).
+        if d.object(forKey: "BlockAutoplay") as? Bool ?? true { c.mediaTypesRequiringUserActionForPlayback = .all }
+        if d.object(forKey: "SuspendHiddenTabs") as? Bool ?? true { c.preferences.inactiveSchedulingPolicy = .suspend }
+        if d.bool(forKey: "LockdownMode") { c.defaultWebpagePreferences.isLockdownModeEnabled = true }
+        if d.bool(forKey: "DisableJavaScript") { c.defaultWebpagePreferences.allowsContentJavaScript = false }
         c.applicationNameForUserAgent = "Version/26.0 Safari/605.1.15"
         return c
     }
@@ -197,6 +203,7 @@ final class Tab: NSObject, WKNavigationDelegate, WKUIDelegate, WKDownloadDelegat
         w.loadHTMLString("<meta charset=utf-8><body style='font:15px -apple-system;padding:60px;color:#8a8276;background:#fffdf8'><h2 style='font-weight:500;color:#2b2722'>Can’t open this page</h2><p>\(msg)</p>", baseURL: nil)
     }
     func webView(_ w: WKWebView, didCommit n: WKNavigation!) { pendingUpgrade = nil }
+    func webView(_ w: WKWebView, didFinish n: WKNavigation!) { AppDelegate.shared.relieveMemory() }
     func webView(_ w: WKWebView, decidePolicyFor r: WKNavigationResponse, decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void) {
         decisionHandler(r.canShowMIMEType ? .allow : .download)
     }
@@ -677,6 +684,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         WKWebsiteDataStore.default().removeData(ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(), modifiedSince: .distantPast) {}
     }
 
+    /// Hands freed-but-cached heap pages in this process back to the OS (cheap; coalesced).
+    private var relief: DispatchWorkItem?
+    func relieveMemory() {
+        relief?.cancel()
+        let w = DispatchWorkItem { malloc_zone_pressure_relief(nil, 0) }
+        relief = w; DispatchQueue.main.asyncAfter(deadline: .now() + 2, execute: w)
+    }
     private func startMemoryManagement() {
         Timer.scheduledTimer(withTimeInterval: min(60, AppDelegate.suspendAfter / 2), repeats: true) { [weak self] _ in
             self?.windows.forEach { $0.suspendBackground(olderThan: AppDelegate.suspendAfter) }
