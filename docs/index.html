@@ -4,9 +4,9 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>PaperBrowser — 髪くらい軽い神ブラウザー</title>
-<meta name="description" content="アプリ全体で288KBのmacOS用ブラウザー。縦タブ、タブの自動休止、広告ブロック、HTTPS優先。">
+<meta name="description" content="アプリ全体で304KBのmacOS用ブラウザー。縦タブ、タブの自動休止、広告ブロック、HTTPS優先。">
 <meta property="og:title" content="PaperBrowser — 髪くらい軽い神ブラウザー">
-<meta property="og:description" content="アプリ全体で288KBのmacOS用ブラウザー。縦タブ、タブの自動休止、広告ブロック、HTTPS優先。">
+<meta property="og:description" content="アプリ全体で304KBのmacOS用ブラウザー。縦タブ、タブの自動休止、広告ブロック、HTTPS優先。">
 <meta property="og:image" content="https://yuuyuu86.github.io/PaperBrowser/screenshot.png">
 <meta name="twitter:card" content="summary_large_image">
 <link rel="icon" href="icon.png">
@@ -219,7 +219,7 @@ footer .h { width: 64px; height: 1px; background: var(--shu); margin: 0 auto 24p
     <div class="hero-in">
       <p class="kanji" aria-label="紙、髪、神。どれも、かみ">紙・髪・神</p>
       <h1><em>髪</em>くらい軽い、<br><em>神</em>ブラウザー</h1>
-      <p class="lead">アプリ全体で <b>288KB</b>。縦タブ、タブの自動休止、広告ブロックまでそろったmacOS用ブラウザーです。</p>
+      <p class="lead">アプリ全体で <b>304KB</b>。縦タブ、タブの自動休止、広告ブロックまでそろったmacOS用ブラウザーです。</p>
       <div class="cta">
         <a class="btn primary" href="https://github.com/yuuyuu86/PaperBrowser/releases/latest/download/PaperBrowser.zip">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m0 0l-5-5m5 5l5-5M5 21h14"/></svg>
@@ -238,7 +238,7 @@ footer .h { width: 64px; height: 1px; background: var(--shu); margin: 0 auto 24p
       <h2>軽さの内訳</h2>
       <p class="sec-lead">描画エンジンを同梱せず、macOSに入っているWebKitをそのまま使います。そのぶんアプリ自体はとても小さくなります。</p>
       <div class="numbers">
-        <div class="num"><b>288<small>KB</small></b><span>アプリ全体のサイズ(アイコン込み)</span></div>
+        <div class="num"><b>304<small>KB</small></b><span>アプリ全体のサイズ(アイコン込み)</span></div>
         <div class="num"><b>32<small>MB</small></b><span>ブラウザー本体プロセスのメモリ</span></div>
         <div class="num"><b>0<small>%</small></b><span>操作していないときのCPU使用率</span></div>
       </div>
@@ -256,7 +256,7 @@ footer .h { width: 64px; height: 1px; background: var(--shu); margin: 0 auto 24p
           </div>
         </div>
         <div class="bars">
-          <div class="bar-row us"><div class="lbl"><span>PaperBrowser</span><span>288 KB</span></div><div class="track"><i id="barUs"></i></div></div>
+          <div class="bar-row us"><div class="lbl"><span>PaperBrowser</span><span>304 KB</span></div><div class="track"><i id="barUs"></i></div></div>
           <div class="bar-row"><div class="lbl"><span id="cmpName">スマホの写真1枚</span><span id="cmpSize">3 MB</span></div><div class="track"><i id="barThem"></i></div></div>
           <p class="ratio" id="ratio"></p>
         </div>
@@ -309,7 +309,7 @@ footer .h { width: 64px; height: 1px; background: var(--shu); margin: 0 auto 24p
     <div class="download" id="download">
       <h2>ダウンロード</h2>
       <p class="sec-lead">無料・オープンソース(MIT)。macOS 14 以降の Apple シリコン Mac に対応しています。</p>
-      <div class="cta"><a class="btn primary" href="https://github.com/yuuyuu86/PaperBrowser/releases/latest/download/PaperBrowser.zip"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m0 0l-5-5m5 5l5-5M5 21h14"/></svg>PaperBrowser.zip(114 KB)</a></div>
+      <div class="cta"><a class="btn primary" href="https://github.com/yuuyuu86/PaperBrowser/releases/latest/download/PaperBrowser.zip"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m0 0l-5-5m5 5l5-5M5 21h14"/></svg>PaperBrowser.zip(119 KB)</a></div>
       <ol class="steps">
         <li>zip を開き、<b>PaperBrowser.app</b> を「アプリケーション」フォルダへ移動します。</li>
         <li>Apple の公証(notarization)を受けていないため、初回は警告が出ます。アプリを<b>右クリックして「開く」</b>を選んでください。</li>
@@ -469,10 +469,10 @@ cd PaperBrowser && ./build.sh</pre></div>
   function compare(btn) {
     $$('.chip').forEach(c => c.classList.toggle('on', c === btn));
     const kb = +btn.dataset.kb, max = 5000;
-    $('#barUs').style.transform = `scaleX(${288 / max})`;
+    $('#barUs').style.transform = `scaleX(${304 / max})`;
     $('#barThem').style.transform = `scaleX(${kb / max})`;
     $('#cmpName').textContent = btn.dataset.n; $('#cmpSize').textContent = fmt(kb);
-    const x = kb / 288;
+    const x = kb / 304;
     $('#ratio').innerHTML = `PaperBrowser の <b>約${x < 10 ? x.toFixed(1) : Math.round(x)}倍</b>`;
   }
   $$('.chip').forEach(c => c.addEventListener('click', () => compare(c)));
