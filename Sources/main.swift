@@ -65,6 +65,32 @@ func symbolButton(_ name: String, _ target: AnyObject, _ sel: Selector, size: CG
     return b
 }
 
+// MARK: - Lite Mode: per-site "JavaScript off" for pages you only read
+
+enum LiteMode {
+    private static let key = "LiteSites"
+    private static var privateHosts: Set<String> = []          // private windows never write to disk
+    private static func saved() -> Set<String> { Set(UserDefaults.standard.stringArray(forKey: key) ?? []) }
+    static func site(_ url: URL?) -> String? {
+        guard let h = url?.host?.lowercased(), !h.isEmpty else { return nil }
+        return h.hasPrefix("www.") ? String(h.dropFirst(4)) : h
+    }
+    static func isOn(_ url: URL?, isPrivate: Bool) -> Bool {
+        guard let s = site(url) else { return false }
+        return saved().contains(s) || (isPrivate && privateHosts.contains(s))
+    }
+    static func toggle(_ url: URL?, isPrivate: Bool) {
+        guard let s = site(url) else { return }
+        if isPrivate && !saved().contains(s) {
+            if privateHosts.contains(s) { privateHosts.remove(s) } else { privateHosts.insert(s) }
+            return
+        }
+        var set = saved()
+        if set.contains(s) { set.remove(s) } else { set.insert(s) }
+        UserDefaults.standard.set(set.sorted(), forKey: key)
+    }
+}
+
 // MARK: - Tab: owns one web view and all of its WebKit delegate logic
 
 final class Tab: NSObject, WKNavigationDelegate, WKUIDelegate, WKDownloadDelegate {
@@ -174,6 +200,10 @@ final class Tab: NSObject, WKNavigationDelegate, WKUIDelegate, WKDownloadDelegat
                var c = URLComponents(url: url, resolvingAgainstBaseURL: false) {
                 c.scheme = "https"; if c.port == 80 { c.port = nil }
                 if let u = c.url { decisionHandler(.cancel, preferences); pendingUpgrade = url.host; w.load(URLRequest(url: u)); return }
+            }
+            if action.targetFrame?.isMainFrame ?? true {
+                preferences.allowsContentJavaScript = !LiteMode.isOn(url, isPrivate: owner?.isPrivate ?? false)
+                    && !UserDefaults.standard.bool(forKey: "DisableJavaScript")
             }
             return decisionHandler(.allow, preferences)
         }
@@ -341,6 +371,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSTex
     private lazy var forwardButton = symbolButton("arrow.right", self, #selector(goForward))
     private lazy var reloadButton = symbolButton("arrow.clockwise", self, #selector(reloadPage))
     private lazy var layoutButton = symbolButton("sidebar.left", self, #selector(toggleTabLayout))
+    private lazy var liteButton = symbolButton("leaf", self, #selector(toggleLiteMode))
     private var layoutConstraints: [NSLayoutConstraint] = []
 
     init(isPrivate: Bool = false) {
@@ -390,7 +421,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSTex
         let newTab = symbolButton("plus", self, #selector(newTab))
         let controls = NSStackView(views: [layoutButton, backButton, forwardButton, reloadButton])
         controls.spacing = 12
-        let tb = NSStackView(views: [controls, addressBox, newTab])
+        let tb = NSStackView(views: [controls, addressBox, liteButton, newTab])
         tb.spacing = 14; tb.alignment = .centerY
         for v in [tb, hairline] as [NSView] { v.translatesAutoresizingMaskIntoConstraints = false; toolbar.addSubview(v) }
         hairWidth = hairline.widthAnchor.constraint(equalToConstant: 0)
@@ -561,6 +592,12 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSTex
         lock.contentTintColor = secure ? Theme.faint : Theme.shu
         lock.toolTip = secure ? "Secure connection" : "Not secure"
         backButton.isEnabled = w.canGoBack; forwardButton.isEnabled = w.canGoForward
+        let lite = LiteMode.isOn(t.url, isPrivate: isPrivate), site = LiteMode.site(t.url)
+        liteButton.isEnabled = site != nil
+        liteButton.image = NSImage(systemSymbolName: lite ? "leaf.fill" : "leaf", accessibilityDescription: "Lite Mode")?
+            .withSymbolConfiguration(.init(pointSize: 13, weight: .regular))
+        liteButton.contentTintColor = lite ? Theme.shu : Theme.faint
+        liteButton.toolTip = site.map { lite ? "Lite Mode is on for \($0) — JavaScript off (⌥⌘L)" : "Lite Mode for \($0): turn JavaScript off to save memory (⌥⌘L)" }
         let p = w.estimatedProgress
         let full = max(addressBox.bounds.width - 16, 0)
         hairWidth.constant = (p > 0 && p < 1) ? full * p : 0
@@ -581,6 +618,12 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSTex
     @objc func newTab(_ s: Any? = nil) { _ = newTab(with: isPrivate ? nil : homeURL) }
     @objc func closeCurrentTab(_ s: Any?) { if let t = selected { closeTab(t) } }
     @objc func toggleTabLayout(_ s: Any? = nil) { layout = layout == .vertical ? .horizontal : .vertical }
+    @objc func toggleLiteMode(_ s: Any? = nil) {
+        guard let t = selected, let url = t.url, LiteMode.site(url) != nil else { NSSound.beep(); return }
+        LiteMode.toggle(url, isPrivate: isPrivate)
+        t.load(url)        // reload so the new JavaScript setting applies
+        syncChrome()
+    }
     @objc func nextTab(_ s: Any?) { cycle(1) }
     @objc func previousTab(_ s: Any?) { cycle(-1) }
     @objc func selectTabByNumber(_ s: NSMenuItem) {
@@ -608,6 +651,10 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSTex
     }
     func validateMenuItem(_ item: NSMenuItem) -> Bool {
         if item.action == #selector(toggleTabLayout) { item.state = layout == .vertical ? .on : .off }
+        if item.action == #selector(toggleLiteMode) {
+            item.state = LiteMode.isOn(selected?.url, isPrivate: isPrivate) ? .on : .off
+            return LiteMode.site(selected?.url) != nil
+        }
         return true
     }
 
@@ -754,7 +801,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             item("Find…", #selector(B.findInPage), "f"),
         ])
         _ = menu("View", [
-            item("Vertical Tabs", #selector(B.toggleTabLayout), "s", [.command, .control]), .separator(),
+            item("Vertical Tabs", #selector(B.toggleTabLayout), "s", [.command, .control]),
+            item("Lite Mode for This Site", #selector(B.toggleLiteMode), "l", [.command, .option]), .separator(),
             item("Reload", #selector(B.reloadPage), "r"),
             item("Reload Ignoring Cache", #selector(B.reloadIgnoringCache), "r", [.command, .shift]),
             item("Stop", #selector(B.stopLoading), "."), .separator(),

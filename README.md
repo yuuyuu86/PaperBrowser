@@ -11,6 +11,8 @@
 - Uses the system WebKit instead of bundling an engine: one Swift file, zero dependencies, **288 KB app / 32 MB app process**
 - Background tabs idle for 5 minutes are fully unloaded (WebKit content process exits); all hidden tabs unload on memory pressure
 - Built-in ad/tracker blocking (`Resources/blocklist.txt`, third-party requests only)
+- **Lite Mode** (leaf button or ⌥⌘L): turn JavaScript off per site for pages you only read — remembered per site, never saved for private windows
+- No media autoplay (click to play); hidden tabs are suspended by WebKit
 
 ## Features
 Vertical tabs or top tabs (⌃⌘S), windows, private windows, address bar search (DuckDuckGo), back/forward & swipe, find in page, zoom, full screen, print, downloads (to ~/Downloads, never auto-opened), file upload, popups, JS dialogs, camera/mic with prompt, ⌘-click background tabs, ⌘1–9 / ⌃Tab.
