@@ -632,23 +632,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         startMemoryManagement()
         loadBlocker { [weak self] in
             guard let self else { return }
-            if self.windows.isEmpty { self.newWindow(with: homeURL) }
+            self.blockerReady = true
+            if !self.pendingURLs.isEmpty { self.openPending() }
+            else if self.windows.isEmpty { self.newWindow(with: homeURL) }
             NSApp.activate()
         }
     }
     func applicationShouldTerminateAfterLastWindowClosed(_ s: NSApplication) -> Bool { true }
+
+    /// URLs handed to us by other apps. Held until the block list is ready so the first page is already filtered,
+    /// and so launching with a link opens only that link (no extra home tab).
+    private var pendingURLs: [URL] = []
+    private var blockerReady = false
     func application(_ app: NSApplication, open urls: [URL]) {
-        let ok = urls.filter { allowedSchemes.contains($0.scheme?.lowercased() ?? "") }
+        pendingURLs += urls.filter { allowedSchemes.contains($0.scheme?.lowercased() ?? "") }
+        if blockerReady { openPending() }
+    }
+    private func openPending() {
+        let ok = pendingURLs; pendingURLs.removeAll()
         guard !ok.isEmpty else { return }
-        let open = { [weak self] in
-            guard let self else { return }
-            if let c = self.current { ok.forEach { c.openTab($0, select: true) } } else {
-                let c = self.newWindow(with: ok[0]); ok.dropFirst().forEach { c.openTab($0, select: false) }
-            }
+        if let c = current { ok.forEach { c.openTab($0, select: true) } } else {
+            let c = newWindow(with: ok[0]); ok.dropFirst().forEach { c.openTab($0, select: false) }
         }
-        if blockRules == nil, Bundle.main.url(forResource: "blocklist", withExtension: "txt") != nil {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: open) // let the blocker finish compiling
-        } else { open() }
     }
 
     @discardableResult func newWindow(with url: URL?, isPrivate: Bool = false) -> BrowserWindowController {
