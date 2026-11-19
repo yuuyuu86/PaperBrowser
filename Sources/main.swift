@@ -93,7 +93,7 @@ enum LiteMode {
 
 // MARK: - Tab: owns one web view and all of its WebKit delegate logic
 
-final class Tab: NSObject, WKNavigationDelegate, WKUIDelegate, WKDownloadDelegate {
+final class Tab: NSObject, WKNavigationDelegate, WKUIDelegate {
     weak var owner: BrowserWindowController?
     private(set) var webView: WKWebView
     private var observers: [NSKeyValueObservation] = []
@@ -103,14 +103,44 @@ final class Tab: NSObject, WKNavigationDelegate, WKUIDelegate, WKDownloadDelegat
     var onChange: (() -> Void)?
     private var httpAllowed: Set<String> = []
     private var pendingUpgrade: String?
+    /// The bookmark this tab belongs to (Arc-style pinned tab), if any.
+    var pinnedKey: String?
+    /// Set while the tab shows the reader view of this page.
+    private(set) var readerSource: URL?
+    private var readerLoading = false
+    var isReader: Bool { readerSource != nil }
 
     var title: String {
         if let t = suspendedTitle { return t }
         if let t = webView.title, !t.isEmpty { return t }
         return webView.url?.host ?? "New Tab"
     }
-    var url: URL? { suspendedURL ?? webView.url }
-    var isSecure: Bool { url?.scheme == "https" && (suspendedURL != nil || webView.hasOnlySecureContent) }
+    var url: URL? { suspendedURL ?? readerSource ?? webView.url }
+    var isSecure: Bool { url?.scheme == "https" && (suspendedURL != nil || readerSource != nil || webView.hasOnlySecureContent) }
+
+    /// A restored tab starts asleep: only its URL and title are kept until it is shown.
+    static func restored(_ url: URL, title: String, pinned: String?, store: WKWebsiteDataStore) -> Tab {
+        let t = Tab(configuration: makeConfiguration(store: store))
+        t.suspendedURL = url; t.suspendedTitle = title.isEmpty ? (url.host ?? url.absoluteString) : title; t.pinnedKey = pinned
+        return t
+    }
+
+    /// Reader view: extract the article and show it on a local, script-free page.
+    func toggleReader(_ done: @escaping (Bool) -> Void) {
+        if readerSource != nil {
+            if webView.canGoBack { webView.goBack() } else if let src = readerSource { webView.load(URLRequest(url: src)) }
+            readerSource = nil; onChange?(); done(true); return
+        }
+        guard let page = webView.url, Store.recordable(page) else { done(false); return }
+        webView.evaluateJavaScript(Reader.extractJS, in: nil, in: .defaultClient) { [weak self] result in
+            guard let self, case .success(let v) = result, let str = v as? String, let data = str.data(using: .utf8),
+                  let o = try? JSONSerialization.jsonObject(with: data) as? [String: String], let html = o["html"] else { done(false); return }
+            self.readerSource = page; self.readerLoading = true
+            self.webView.loadHTMLString(Reader.page(title: o["title"] ?? "", site: o["site"] ?? (page.host ?? ""),
+                                                    byline: o["byline"] ?? "", lang: o["lang"] ?? "", body: html, source: page), baseURL: nil)
+            self.onChange?(); done(true)
+        }
+    }
 
     init(configuration: WKWebViewConfiguration) {
         webView = WKWebView(frame: .zero, configuration: configuration)
@@ -232,27 +262,22 @@ final class Tab: NSObject, WKNavigationDelegate, WKUIDelegate, WKDownloadDelegat
         let msg = e.localizedDescription.replacingOccurrences(of: "&", with: "&amp;").replacingOccurrences(of: "<", with: "&lt;")
         w.loadHTMLString("<meta charset=utf-8><body style='font:15px -apple-system;padding:60px;color:#8a8276;background:#fffdf8'><h2 style='font-weight:500;color:#2b2722'>Can’t open this page</h2><p>\(msg)</p>", baseURL: nil)
     }
-    func webView(_ w: WKWebView, didCommit n: WKNavigation!) { pendingUpgrade = nil }
-    func webView(_ w: WKWebView, didFinish n: WKNavigation!) { AppDelegate.shared.relieveMemory() }
+    func webView(_ w: WKWebView, didCommit n: WKNavigation!) {
+        pendingUpgrade = nil
+        if readerLoading { readerLoading = false } else if readerSource != nil { readerSource = nil; onChange?() }
+    }
+    func webView(_ w: WKWebView, didFinish n: WKNavigation!) {
+        AppDelegate.shared.relieveMemory()
+        guard owner?.isPrivate == false, readerSource == nil, let u = w.url else { return }
+        Store.shared.visit(u, title: w.title)
+        Favicons.shared.learn(from: w)
+    }
     func webView(_ w: WKWebView, decidePolicyFor r: WKNavigationResponse, decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void) {
         decisionHandler(r.canShowMIMEType ? .allow : .download)
     }
-    func webView(_ w: WKWebView, navigationAction: WKNavigationAction, didBecome d: WKDownload) { d.delegate = self }
-    func webView(_ w: WKWebView, navigationResponse: WKNavigationResponse, didBecome d: WKDownload) { d.delegate = self }
+    func webView(_ w: WKWebView, navigationAction: WKNavigationAction, didBecome d: WKDownload) { d.delegate = Downloads.shared }
+    func webView(_ w: WKWebView, navigationResponse: WKNavigationResponse, didBecome d: WKDownload) { d.delegate = Downloads.shared }
     func webViewWebContentProcessDidTerminate(_ w: WKWebView) { if suspendedURL == nil { w.reload() } }
-
-    // MARK: Downloads — saved to ~/Downloads, never auto-opened
-    func download(_ d: WKDownload, decideDestinationUsing r: URLResponse, suggestedFilename name: String, completionHandler: @escaping (URL?) -> Void) {
-        let dir = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask)[0]
-        let safe = (name as NSString).lastPathComponent.replacingOccurrences(of: ":", with: "_")
-        let base = (safe as NSString).deletingPathExtension, ext = (safe as NSString).pathExtension
-        var dest = dir.appendingPathComponent(safe.isEmpty ? "download" : safe), i = 1
-        while FileManager.default.fileExists(atPath: dest.path) {
-            dest = dir.appendingPathComponent("\(base) (\(i))" + (ext.isEmpty ? "" : ".\(ext)")); i += 1
-        }
-        completionHandler(dest)
-    }
-    func downloadDidFinish(_ d: WKDownload) { NSSound(named: "Glass")?.play() }
 
     // MARK: UI delegate — popups, dialogs, file upload, permissions
     func webView(_ w: WKWebView, createWebViewWith cfg: WKWebViewConfiguration, for action: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
@@ -293,10 +318,14 @@ final class Tab: NSObject, WKNavigationDelegate, WKUIDelegate, WKDownloadDelegat
 final class TabItemView: FlatView {
     let label = NSTextField(labelWithString: "")
     let dot = FlatView()
+    let icon = NSImageView()
+    var menuProvider: (() -> NSMenu?)?
     lazy var closeButton = symbolButton("xmark", self, #selector(closeClicked), size: 9)
     var onSelect: (() -> Void)?, onClose: (() -> Void)?
     var selected = false { didSet { restyle() } }
     var sleeping = false { didSet { restyle() } }
+    var closable = true { didSet { restyle() } }
+    func setIcon(_ img: NSImage?) { icon.image = img; restyle() }
     private var hovering = false { didSet { restyle() } }
 
     init(vertical: Bool) {
@@ -306,13 +335,17 @@ final class TabItemView: FlatView {
         label.lineBreakMode = .byTruncatingTail
         label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         dot.radius = 2.5; dot.fill = Theme.faint
-        for v in [dot, label, closeButton] as [NSView] { v.translatesAutoresizingMaskIntoConstraints = false; addSubview(v) }
+        icon.imageScaling = .scaleProportionallyUpOrDown
+        for v in [dot, icon, label, closeButton] as [NSView] { v.translatesAutoresizingMaskIntoConstraints = false; addSubview(v) }
         NSLayoutConstraint.activate([
             heightAnchor.constraint(equalToConstant: vertical ? 30 : 28),
             dot.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
             dot.centerYAnchor.constraint(equalTo: centerYAnchor),
             dot.widthAnchor.constraint(equalToConstant: 5), dot.heightAnchor.constraint(equalToConstant: 5),
-            label.leadingAnchor.constraint(equalTo: dot.trailingAnchor, constant: 8),
+            icon.centerXAnchor.constraint(equalTo: dot.centerXAnchor, constant: 4),
+            icon.centerYAnchor.constraint(equalTo: centerYAnchor),
+            icon.widthAnchor.constraint(equalToConstant: 16), icon.heightAnchor.constraint(equalToConstant: 16),
+            label.leadingAnchor.constraint(equalTo: dot.trailingAnchor, constant: 14),
             label.centerYAnchor.constraint(equalTo: centerYAnchor),
             closeButton.leadingAnchor.constraint(greaterThanOrEqualTo: label.trailingAnchor, constant: 4),
             closeButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
@@ -329,13 +362,79 @@ final class TabItemView: FlatView {
         stroke = selected ? Theme.hair : nil
         label.textColor = selected ? Theme.ink : Theme.faint
         dot.fill = selected ? Theme.shu : sleeping ? Theme.hair : Theme.faint
-        closeButton.isHidden = !(selected || hovering)
+        dot.isHidden = icon.image != nil
+        icon.alphaValue = sleeping && !selected ? 0.45 : 1
+        closeButton.isHidden = !(selected || hovering) || !closable
     }
     override func mouseEntered(with e: NSEvent) { hovering = true }
     override func mouseExited(with e: NSEvent) { hovering = false }
     override func mouseDown(with e: NSEvent) { onSelect?() }
-    override func otherMouseUp(with e: NSEvent) { if e.buttonNumber == 2 { onClose?() } }
+    override func otherMouseUp(with e: NSEvent) { if e.buttonNumber == 2 && closable { onClose?() } }
+    override func menu(for event: NSEvent) -> NSMenu? { menuProvider?() }
     @objc private func closeClicked() { onClose?() }
+}
+
+/// A menu item that runs a closure.
+final class ActionItem: NSMenuItem {
+    private var run: () -> Void = {}
+    convenience init(_ title: String, _ run: @escaping () -> Void) {
+        self.init(title: title, action: #selector(fire), keyEquivalent: ""); self.run = run; target = self
+    }
+    @objc private func fire() { run() }
+}
+func makeMenu(_ items: [NSMenuItem]) -> NSMenu { let m = NSMenu(); items.forEach(m.addItem); return m }
+
+/// Arc-style favorite: a square tile with the site's icon.
+final class FavoriteTile: FlatView {
+    private let icon = NSImageView(), letter = NSTextField(labelWithString: "")
+    var onClick: (() -> Void)?, menuProvider: (() -> NSMenu?)?
+    var selected = false { didSet { restyle() } }
+    private var hovering = false { didSet { restyle() } }
+    init(title: String, image: NSImage?) {
+        super.init(frame: .zero)
+        radius = 10; toolTip = title
+        icon.image = image; icon.imageScaling = .scaleProportionallyUpOrDown
+        letter.stringValue = String(title.prefix(1)).uppercased(); letter.font = .systemFont(ofSize: 15, weight: .medium)
+        letter.textColor = Theme.faint; letter.isHidden = image != nil
+        for v in [icon, letter] as [NSView] { v.translatesAutoresizingMaskIntoConstraints = false; addSubview(v) }
+        NSLayoutConstraint.activate([
+            heightAnchor.constraint(equalToConstant: 44),
+            icon.centerXAnchor.constraint(equalTo: centerXAnchor), icon.centerYAnchor.constraint(equalTo: centerYAnchor),
+            icon.widthAnchor.constraint(equalToConstant: 20), icon.heightAnchor.constraint(equalToConstant: 20),
+            letter.centerXAnchor.constraint(equalTo: centerXAnchor), letter.centerYAnchor.constraint(equalTo: centerYAnchor),
+        ])
+        addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect], owner: self))
+        restyle()
+    }
+    required init?(coder: NSCoder) { fatalError() }
+    private func restyle() { fill = selected ? Theme.sheet : hovering ? Theme.hover : Theme.hover.withAlphaComponent(0.55); stroke = selected ? Theme.hair : nil }
+    override func mouseEntered(with e: NSEvent) { hovering = true }
+    override func mouseExited(with e: NSEvent) { hovering = false }
+    override func mouseDown(with e: NSEvent) { onClick?() }
+    override func menu(for event: NSEvent) -> NSMenu? { menuProvider?() }
+}
+
+/// Row that separates pinned items from today's tabs, with a Clear button.
+final class SeparatorRow: NSView {
+    init(clear: (target: AnyObject, action: Selector)?) {
+        super.init(frame: .zero)
+        let line = FlatView(); line.fill = Theme.hair
+        for v in [line] as [NSView] { v.translatesAutoresizingMaskIntoConstraints = false; addSubview(v) }
+        var cs = [heightAnchor.constraint(equalToConstant: 28),
+                  line.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
+                  line.centerYAnchor.constraint(equalTo: centerYAnchor), line.heightAnchor.constraint(equalToConstant: 1)]
+        if let clear {
+            let b = NSButton(title: "Clear", target: clear.target, action: clear.action)
+            b.isBordered = false; b.font = .systemFont(ofSize: 11); b.contentTintColor = Theme.faint
+            b.attributedTitle = NSAttributedString(string: "Clear", attributes: [.font: NSFont.systemFont(ofSize: 11), .foregroundColor: Theme.faint])
+            b.toolTip = "Close all tabs that are not pinned"
+            b.translatesAutoresizingMaskIntoConstraints = false; addSubview(b)
+            cs += [b.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8), b.centerYAnchor.constraint(equalTo: centerYAnchor),
+                   line.trailingAnchor.constraint(equalTo: b.leadingAnchor, constant: -10)]
+        } else { cs.append(line.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10)) }
+        NSLayoutConstraint.activate(cs)
+    }
+    required init?(coder: NSCoder) { fatalError() }
 }
 
 /// Clicks on empty chrome drag the window (titlebar is hidden).
@@ -372,6 +471,18 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSTex
     private lazy var reloadButton = symbolButton("arrow.clockwise", self, #selector(reloadPage))
     private lazy var layoutButton = symbolButton("sidebar.left", self, #selector(toggleTabLayout))
     private lazy var liteButton = symbolButton("leaf", self, #selector(toggleLiteMode))
+    private lazy var readerButton = symbolButton("doc.plaintext", self, #selector(toggleReader))
+    private lazy var pinButton = symbolButton("pin", self, #selector(togglePin))
+    private lazy var downloadsButton = symbolButton("arrow.down.circle", self, #selector(showDownloads))
+    private let suggestions = SuggestionsPopup()
+    private lazy var findBar: FindBar = {
+        let f = FindBar()
+        f.onSearch = { [weak self] q, back in self?.find(q, backwards: back) }
+        f.onClose = { [weak self] in self?.hideFind() }
+        return f
+    }()
+    private var lastFind = ""
+    private var closedTabs: [(url: URL, title: String, pinned: String?)] = []
     private var layoutConstraints: [NSLayoutConstraint] = []
 
     init(isPrivate: Bool = false) {
@@ -389,6 +500,12 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSTex
         super.init(window: window)
         window.delegate = self
         buildChrome()
+        suggestions.onPick = { [weak self] s in self?.suggestions.hide(); self?.loadInSelected(s.url) }
+        let nc = NotificationCenter.default
+        nc.addObserver(self, selector: #selector(sidebarDataChanged), name: .pbBookmarksChanged, object: nil)
+        nc.addObserver(self, selector: #selector(sidebarDataChanged), name: .pbFaviconsChanged, object: nil)
+        nc.addObserver(self, selector: #selector(downloadsChanged), name: .pbDownloadsChanged, object: nil)
+        downloadsChanged()
         applyLayout()
         window.setFrameAutosaveName("PaperBrowserMain")
     }
@@ -421,7 +538,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSTex
         let newTab = symbolButton("plus", self, #selector(newTab))
         let controls = NSStackView(views: [layoutButton, backButton, forwardButton, reloadButton])
         controls.spacing = 12
-        let tb = NSStackView(views: [controls, addressBox, liteButton, newTab])
+        let tb = NSStackView(views: [controls, addressBox, readerButton, pinButton, liteButton, downloadsButton, newTab])
         tb.spacing = 14; tb.alignment = .centerY
         for v in [tb, hairline] as [NSView] { v.translatesAutoresizingMaskIntoConstraints = false; toolbar.addSubview(v) }
         hairWidth = hairline.widthAnchor.constraint(equalToConstant: 0)
@@ -538,15 +655,20 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSTex
         tab.resumeIfNeeded()
         let w = tab.webView
         w.frame = content.bounds; w.autoresizingMask = [.width, .height]
-        content.addSubview(w)
-        rebuildTabList(); syncChrome()
+        content.addSubview(w, positioned: .below, relativeTo: nil)     // stays under the find bar
+        if itemViews[ObjectIdentifier(tab)] == nil && (tab.pinnedKey == nil || pinViews[tab.pinnedKey!] == nil && tileViews[tab.pinnedKey!] == nil) { rebuildTabList() }
+        else { for (id, v) in itemViews { v.selected = id == ObjectIdentifier(tab) }; refreshPinnedState() }
+        findBar.setFound(nil)
+        syncChrome()
+        AppDelegate.shared.saveSessionSoon()
         if tab.url == nil { focusAddress(nil) } else { window?.makeFirstResponder(w) }
     }
     func closeTab(_ tab: Tab) {
         guard let i = tabs.firstIndex(where: { $0 === tab }) else { return }
-        tab.close(); tabs.remove(at: i)
+        remember(tab); tab.close(); tabs.remove(at: i)
+        AppDelegate.shared.saveSessionSoon()
         if tabs.isEmpty { selected = nil; window?.close(); return }
-        if selected === tab { selected = nil; select(tabs[min(i, tabs.count - 1)]) } else { rebuildTabList() }
+        if selected === tab { selected = nil; rebuildTabList(); select(tabs[min(i, tabs.count - 1)]) } else { rebuildTabList() }
     }
     /// Unloads hidden tabs idle for `age` seconds.
     func suspendBackground(olderThan age: TimeInterval) {
@@ -558,29 +680,217 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSTex
     }
 
     private var itemViews: [ObjectIdentifier: TabItemView] = [:]
+    private var pinViews: [String: TabItemView] = [:]
+    private var tileViews: [String: FavoriteTile] = [:]
     private func rebuildTabList() {
-        let list = layout == .vertical ? sideList : stripList
         sideList.arrangedSubviews.forEach { $0.removeFromSuperview() }
         stripList.arrangedSubviews.forEach { $0.removeFromSuperview() }
-        itemViews.removeAll()
-        for t in tabs {
-            let v = TabItemView(vertical: layout == .vertical)
-            v.onSelect = { [weak self, weak t] in if let t { self?.select(t) } }
-            v.onClose = { [weak self, weak t] in if let t { self?.closeTab(t) } }
-            list.addArrangedSubview(v)
-            if layout == .vertical { v.widthAnchor.constraint(equalTo: list.widthAnchor).isActive = true }
-            else { v.widthAnchor.constraint(lessThanOrEqualToConstant: 220).isActive = true; v.widthAnchor.constraint(greaterThanOrEqualToConstant: 90).isActive = true }
-            itemViews[ObjectIdentifier(t)] = v
-            update(v, t)
+        itemViews.removeAll(); pinViews.removeAll(); tileViews.removeAll()
+        if layout == .horizontal {
+            for t in tabs { addRow(for: t, to: stripList, vertical: false) }
+            return
         }
+        let list = sideList
+        func fill(_ v: NSView) { list.addArrangedSubview(v); v.widthAnchor.constraint(equalTo: list.widthAnchor).isActive = true }
+        // Favorites: icon tiles, three per row
+        let favs = Store.shared.favorites
+        for chunk in stride(from: 0, to: favs.count, by: 3).map({ Array(favs[$0..<min($0 + 3, favs.count)]) }) {
+            var tiles: [NSView] = chunk.map { b in
+                let tile = FavoriteTile(title: b.title, image: Favicons.shared.image(for: URL(string: b.url)))
+                Favicons.shared.prefetch(URL(string: b.url))
+                tile.onClick = { [weak self] in self?.openBookmark(b.url) }
+                tile.menuProvider = { [weak self] in self?.bookmarkMenu(b.url) }
+                tileViews[b.url] = tile
+                return tile
+            }
+            while tiles.count < 3 { tiles.append(NSView()) }
+            let row = NSStackView(views: tiles); row.distribution = .fillEqually; row.spacing = 6
+            fill(row)
+        }
+        if !favs.isEmpty { let gap = NSView(); gap.heightAnchor.constraint(equalToConstant: 6).isActive = true; fill(gap) }
+        // Pinned: bookmarks as rows; selecting one opens (or returns to) its tab
+        let pins = Store.shared.pinned
+        for b in pins {
+            let v = TabItemView(vertical: true)
+            v.label.stringValue = b.title; v.toolTip = b.url
+            v.setIcon(Favicons.shared.image(for: URL(string: b.url)))
+            Favicons.shared.prefetch(URL(string: b.url))
+            v.onSelect = { [weak self] in self?.openBookmark(b.url) }
+            v.onClose = { [weak self] in if let t = self?.tabs.first(where: { $0.pinnedKey == b.url }) { self?.closeTab(t) } }
+            v.menuProvider = { [weak self] in self?.bookmarkMenu(b.url) }
+            fill(v); pinViews[b.url] = v
+        }
+        let loose = tabs.filter { $0.pinnedKey == nil }
+        if !favs.isEmpty || !pins.isEmpty {
+            fill(SeparatorRow(clear: loose.isEmpty ? nil : (self, #selector(clearTabs))))
+        }
+        let newRow = TabItemView(vertical: true)
+        newRow.label.stringValue = "New Tab"; newRow.closable = false
+        newRow.setIcon(NSImage(systemSymbolName: "plus", accessibilityDescription: "New Tab"))
+        newRow.icon.contentTintColor = Theme.faint
+        newRow.onSelect = { [weak self] in self?.newTab(nil) }
+        fill(newRow)
+        for t in loose { addRow(for: t, to: list, vertical: true) }
+        refreshPinnedState()
+    }
+    private func addRow(for t: Tab, to list: NSStackView, vertical: Bool) {
+        let v = TabItemView(vertical: vertical)
+        v.onSelect = { [weak self, weak t] in if let t { self?.select(t) } }
+        v.onClose = { [weak self, weak t] in if let t { self?.closeTab(t) } }
+        v.menuProvider = { [weak self, weak t] in t.flatMap { self?.tabMenu($0) } }
+        list.addArrangedSubview(v)
+        if vertical { v.widthAnchor.constraint(equalTo: list.widthAnchor).isActive = true }
+        else { v.widthAnchor.constraint(lessThanOrEqualToConstant: 220).isActive = true; v.widthAnchor.constraint(greaterThanOrEqualToConstant: 90).isActive = true }
+        itemViews[ObjectIdentifier(t)] = v
+        update(v, t)
+    }
+    /// Highlights the favorite / pinned row whose tab is selected, and dims pinned items that are not open.
+    private func refreshPinnedState() {
+        for (k, v) in pinViews {
+            let t = tabs.first { $0.pinnedKey == k }
+            v.selected = t != nil && t === selected
+            v.sleeping = t == nil || t?.suspendedURL != nil
+            v.closable = t != nil
+        }
+        for (k, tile) in tileViews { tile.selected = selected?.pinnedKey == k }
+    }
+    @objc private func sidebarDataChanged() {
+        // a bookmark removed elsewhere turns its open tab back into a normal tab
+        for t in tabs where t.pinnedKey != nil && Store.shared.bookmark(t.pinnedKey) == nil { t.pinnedKey = nil }
+        rebuildTabList(); syncChrome()
     }
     private func update(_ v: TabItemView, _ t: Tab) {
         v.label.stringValue = t.title; v.toolTip = t.title
         v.selected = t === selected; v.sleeping = t.suspendedURL != nil
+        v.setIcon(Favicons.shared.image(for: t.url))
     }
     private func tabChanged(_ t: Tab) {
         if let v = itemViews[ObjectIdentifier(t)] { update(v, t) }
         if t === selected { syncChrome() }
+        if !isPrivate, t.readerSource == nil, let u = t.webView.url, let title = t.webView.title { Store.shared.updateTitle(u, title) }
+        AppDelegate.shared.saveSessionSoon()
+    }
+
+    // MARK: Pinned tabs & favorites (Arc-style bookmarks)
+    func openBookmark(_ key: String) {
+        if let t = tabs.first(where: { $0.pinnedKey == key }) { select(t); return }
+        guard let u = URL(string: key) else { return }
+        let t = Tab(configuration: Tab.makeConfiguration(store: store))
+        t.pinnedKey = key; t.load(u)
+        add(t, select: true)
+    }
+    private func bookmarkMenu(_ key: String) -> NSMenu {
+        let fav = Store.shared.bookmark(key)?.favorite == true
+        return makeMenu([
+            ActionItem(fav ? "Move to Pinned" : "Add to Favorites") { Store.shared.setFavorite(key, !fav) },
+            ActionItem("Move Up") { Store.shared.moveBookmark(key, by: -1) },
+            ActionItem("Move Down") { Store.shared.moveBookmark(key, by: 1) },
+            ActionItem("Copy Link") { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(key, forType: .string) },
+            .separator(),
+            ActionItem(fav ? "Remove from Favorites" : "Unpin") { Store.shared.removeBookmark(key) },
+        ])
+    }
+    private func tabMenu(_ t: Tab) -> NSMenu {
+        var items: [NSMenuItem] = []
+        if let u = t.url, Store.recordable(u) {
+            items += [ActionItem("Pin Tab") { [weak self, weak t] in if let t { self?.pin(t, favorite: false) } },
+                      ActionItem("Add to Favorites") { [weak self, weak t] in if let t { self?.pin(t, favorite: true) } },
+                      ActionItem("Copy Link") { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(u.absoluteString, forType: .string) },
+                      .separator()]
+        }
+        items.append(ActionItem("Close Tab") { [weak self, weak t] in if let t { self?.closeTab(t) } })
+        return makeMenu(items)
+    }
+    private func pin(_ t: Tab, favorite: Bool) {
+        guard let u = t.url, Store.recordable(u) else { return }
+        t.pinnedKey = u.absoluteString
+        Store.shared.addBookmark(u, title: t.title, favorite: favorite)
+    }
+    @objc func togglePin(_ s: Any? = nil) {
+        guard let t = selected, let u = t.url, Store.recordable(u) else { NSSound.beep(); return }
+        if let k = t.pinnedKey { Store.shared.removeBookmark(k); t.pinnedKey = nil }
+        else if Store.shared.isBookmarked(u) { Store.shared.removeBookmark(u.absoluteString) }
+        else { pin(t, favorite: false) }
+    }
+    @objc func clearTabs(_ s: Any? = nil) {
+        let loose = tabs.filter { $0.pinnedKey == nil }
+        for t in loose { remember(t); t.close() }
+        tabs.removeAll { $0.pinnedKey == nil }
+        if tabs.isEmpty { selected = nil; _ = newTab(with: isPrivate ? nil : homeURL); return }
+        if let s = selected, !tabs.contains(where: { $0 === s }) { selected = nil; select(tabs[0]) }
+        rebuildTabList()
+        AppDelegate.shared.saveSessionSoon()
+    }
+    private func remember(_ t: Tab) {
+        guard let u = t.url, Store.recordable(u) else { return }
+        closedTabs.append((u, t.title, t.pinnedKey)); if closedTabs.count > 20 { closedTabs.removeFirst() }
+    }
+    @objc func reopenClosedTab(_ s: Any?) {
+        guard let c = closedTabs.popLast() else { NSSound.beep(); return }
+        if let k = c.pinned, Store.shared.bookmark(k) != nil { openBookmark(k); return }
+        _ = newTab(with: c.url)
+    }
+    var savedState: SavedWindow? {
+        let ts = tabs.compactMap { t -> SavedTab? in
+            guard let u = t.url, Store.recordable(u) else { return nil }
+            return SavedTab(url: u.absoluteString, title: t.title, pinned: t.pinnedKey)
+        }
+        guard !ts.isEmpty else { return nil }
+        let live = tabs.filter { Store.recordable($0.url) }
+        return SavedWindow(tabs: ts, selected: max(0, live.firstIndex { $0 === selected } ?? 0))
+    }
+    func restore(_ w: SavedWindow) {
+        for st in w.tabs {
+            guard let u = URL(string: st.url) else { continue }
+            add(Tab.restored(u, title: st.title, pinned: st.pinned.flatMap { Store.shared.bookmark($0) != nil ? $0 : nil }, store: store), select: false)
+        }
+        if tabs.indices.contains(w.selected) { select(tabs[w.selected]) }
+    }
+
+    // MARK: Reader, find, downloads
+    @objc func toggleReader(_ s: Any? = nil) {
+        guard let t = selected else { return }
+        t.toggleReader { [weak self] ok in
+            if !ok { NSSound.beep(); self?.flashReaderUnavailable() }
+            self?.syncChrome()
+        }
+    }
+    private func flashReaderUnavailable() { readerButton.toolTip = "No article found on this page" }
+    @objc func findInPage(_ s: Any?) {
+        if findBar.superview == nil {
+            findBar.translatesAutoresizingMaskIntoConstraints = false
+            content.addSubview(findBar, positioned: .above, relativeTo: nil)
+            NSLayoutConstraint.activate([
+                findBar.topAnchor.constraint(equalTo: content.topAnchor, constant: 8),
+                findBar.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -8),
+                findBar.widthAnchor.constraint(equalToConstant: 340), findBar.heightAnchor.constraint(equalToConstant: 36),
+            ])
+        }
+        if findBar.field.stringValue.isEmpty { findBar.field.stringValue = lastFind }
+        window?.makeFirstResponder(findBar.field); findBar.field.currentEditor()?.selectAll(nil)
+    }
+    private func find(_ q: String, backwards: Bool) {
+        guard !q.isEmpty, let w = selected?.webView else { findBar.setFound(nil); return }
+        lastFind = q
+        let c = WKFindConfiguration(); c.backwards = backwards; c.wraps = true; c.caseSensitive = false
+        w.find(q, configuration: c) { [weak self] r in self?.findBar.setFound(r.matchFound) }
+    }
+    @objc func findNext(_ s: Any?) { if lastFind.isEmpty { findInPage(nil) } else { find(lastFind, backwards: false) } }
+    @objc func findPrevious(_ s: Any?) { if lastFind.isEmpty { findInPage(nil) } else { find(lastFind, backwards: true) } }
+    private func hideFind() {
+        findBar.removeFromSuperview(); findBar.setFound(nil)
+        if let w = selected?.webView { window?.makeFirstResponder(w) }
+    }
+    @objc func showDownloads(_ s: Any? = nil) { LibraryWindowController.shared.show(.downloads) }
+    @objc private func downloadsChanged() {
+        let d = Downloads.shared
+        downloadsButton.isHidden = d.items.isEmpty
+        downloadsButton.contentTintColor = d.active > 0 ? Theme.shu : Theme.faint
+        downloadsButton.toolTip = d.active > 0 ? "\(d.active) downloading (⇧⌘J)" : "Downloads (⇧⌘J)"
+    }
+    private func loadInSelected(_ u: URL) {
+        guard let t = selected else { return }
+        t.load(u); window?.makeFirstResponder(t.webView)
     }
 
     private func syncChrome() {
@@ -598,6 +908,18 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSTex
             .withSymbolConfiguration(.init(pointSize: 13, weight: .regular))
         liteButton.contentTintColor = lite ? Theme.shu : Theme.faint
         liteButton.toolTip = site.map { lite ? "Lite Mode is on for \($0) — JavaScript off (⌥⌘L)" : "Lite Mode for \($0): turn JavaScript off to save memory (⌥⌘L)" }
+        let canRead = Store.recordable(t.url)
+        readerButton.isEnabled = canRead || t.isReader
+        readerButton.image = NSImage(systemSymbolName: t.isReader ? "doc.plaintext.fill" : "doc.plaintext", accessibilityDescription: "Reader")?
+            .withSymbolConfiguration(.init(pointSize: 13, weight: .regular))
+        readerButton.contentTintColor = t.isReader ? Theme.shu : Theme.faint
+        readerButton.toolTip = t.isReader ? "Exit Reader (⇧⌘R)" : "Reader: the article only, no scripts (⇧⌘R)"
+        let pinned = t.pinnedKey != nil || Store.shared.isBookmarked(t.url)
+        pinButton.isEnabled = canRead
+        pinButton.image = NSImage(systemSymbolName: pinned ? "pin.fill" : "pin", accessibilityDescription: "Pin")?
+            .withSymbolConfiguration(.init(pointSize: 13, weight: .regular))
+        pinButton.contentTintColor = pinned ? Theme.shu : Theme.faint
+        pinButton.toolTip = pinned ? "Unpin (⌘D)" : "Pin this tab to the sidebar (⌘D)"
         let p = w.estimatedProgress
         let full = max(addressBox.bounds.width - 16, 0)
         hairWidth.constant = (p > 0 && p < 1) ? full * p : 0
@@ -605,7 +927,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSTex
     }
 
     // MARK: Actions
-    @objc func go() { if let u = resolve(address.stringValue), let t = selected { t.load(u); window?.makeFirstResponder(t.webView) } }
+    @objc func go() { suggestions.hide(); if let u = resolve(address.stringValue) { loadInSelected(u) } }
     @objc func goBack() { selected?.webView.goBack() }
     @objc func goForward() { selected?.webView.goForward() }
     @objc func reloadPage() { selected?.webView.reload() }
@@ -638,19 +960,15 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSTex
         guard let w = selected?.webView, let win = window else { return }
         w.printOperation(with: .shared).runModal(for: win, delegate: nil, didRun: nil, contextInfo: nil)
     }
-    @objc func findInPage(_ s: Any?) {
-        guard let win = window else { return }
-        let a = NSAlert(); a.messageText = "Find in Page"; a.addButton(withTitle: "Find"); a.addButton(withTitle: "Cancel")
-        let f = NSTextField(frame: NSRect(x: 0, y: 0, width: 260, height: 24)); a.accessoryView = f
-        a.window.initialFirstResponder = f
-        a.beginSheetModal(for: win) { [weak self] r in
-            guard r == .alertFirstButtonReturn, !f.stringValue.isEmpty else { return }
-            let c = WKFindConfiguration(); c.wraps = true
-            self?.selected?.webView.find(f.stringValue, configuration: c) { if !$0.matchFound { NSSound.beep() } }
-        }
-    }
     func validateMenuItem(_ item: NSMenuItem) -> Bool {
         if item.action == #selector(toggleTabLayout) { item.state = layout == .vertical ? .on : .off }
+        if item.action == #selector(reopenClosedTab) { return !closedTabs.isEmpty }
+        if item.action == #selector(toggleReader) { item.title = selected?.isReader == true ? "Exit Reader" : "Show Reader"; return Store.recordable(selected?.url) || selected?.isReader == true }
+        if item.action == #selector(togglePin) {
+            let pinned = selected?.pinnedKey != nil || Store.shared.isBookmarked(selected?.url)
+            item.title = pinned ? "Unpin This Page" : "Pin This Page"; return Store.recordable(selected?.url)
+        }
+        if item.action == #selector(clearTabs) { return tabs.contains { $0.pinnedKey == nil } }
         if item.action == #selector(toggleLiteMode) {
             item.state = LiteMode.isOn(selected?.url, isPrivate: isPrivate) ? .on : .off
             return LiteMode.site(selected?.url) != nil
@@ -658,11 +976,35 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSTex
         return true
     }
 
-    func controlTextDidEndEditing(_ n: Notification) { syncChrome() }
+    func controlTextDidEndEditing(_ n: Notification) { suggestions.hide(); syncChrome() }
+    func controlTextDidChange(_ n: Notification) {
+        guard (n.object as? NSTextField) === address else { return }
+        let q = address.stringValue.trimmingCharacters(in: .whitespaces)
+        if q.isEmpty { suggestions.hide() } else { suggestions.show(Store.shared.suggestions(q), under: addressBox) }
+    }
+    func control(_ c: NSControl, textView: NSTextView, doCommandBy sel: Selector) -> Bool {
+        guard c === address else { return false }
+        switch sel {
+        case #selector(NSResponder.moveDown(_:)) where suggestions.isVisible: suggestions.move(1); return true
+        case #selector(NSResponder.moveUp(_:)) where suggestions.isVisible: suggestions.move(-1); return true
+        case #selector(NSResponder.cancelOperation(_:)), #selector(NSTextView.complete(_:)):   // esc arrives as complete:
+            if suggestions.isVisible { suggestions.hide(); return true }
+            address.stringValue = selected?.url?.absoluteString ?? ""
+            if let w = selected?.webView { window?.makeFirstResponder(w) }
+            return true
+        case #selector(NSResponder.insertNewline(_:)):
+            if suggestions.isVisible, let s = suggestions.selected { suggestions.hide(); loadInSelected(s.url); return true }
+            return false
+        default: return false
+        }
+    }
     func windowDidResize(_ n: Notification) { syncChrome() }
     func windowWillClose(_ n: Notification) {
+        suggestions.hide()
+        NotificationCenter.default.removeObserver(self)
         tabs.forEach { $0.close() }; tabs.removeAll(); selected = nil
         AppDelegate.shared.windows.removeAll { $0 === self }
+        AppDelegate.shared.saveSessionSoon()
     }
 }
 
@@ -670,7 +1012,7 @@ final class FlippedView: NSView { override var isFlipped: Bool { true } }
 
 // MARK: - App
 
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     static let shared = AppDelegate()
     var windows: [BrowserWindowController] = []
     var blockRules: WKContentRuleList?
@@ -687,12 +1029,81 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         loadBlocker { [weak self] in
             guard let self else { return }
             self.blockerReady = true
+            self.restoreSession()
             if !self.pendingURLs.isEmpty { self.openPending() }
             else if self.windows.isEmpty { self.newWindow(with: homeURL) }
             NSApp.activate()
         }
     }
     func applicationShouldTerminateAfterLastWindowClosed(_ s: NSApplication) -> Bool { true }
+    func applicationShouldTerminate(_ s: NSApplication) -> NSApplication.TerminateReply {
+        saveSessionNow(); terminating = true
+        Store.shared.flush()
+        return .terminateNow
+    }
+
+    // MARK: Session: tabs come back asleep, so restoring many costs almost nothing
+    private var terminating = false
+    private var sessionSave: DispatchWorkItem?
+    static var restoreEnabled: Bool { UserDefaults.standard.object(forKey: "RestoreSession") as? Bool ?? true }
+    func saveSessionSoon() {
+        guard !terminating, AppDelegate.restoreEnabled else { return }
+        sessionSave?.cancel()
+        let w = DispatchWorkItem { [weak self] in self?.saveSessionNow() }
+        sessionSave = w; DispatchQueue.main.asyncAfter(deadline: .now() + 1, execute: w)
+    }
+    private func saveSessionNow() {
+        guard !terminating, AppDelegate.restoreEnabled else { return }
+        sessionSave?.cancel(); sessionSave = nil
+        Store.shared.saveSession(windows.filter { !$0.isPrivate }.compactMap(\.savedState))
+    }
+    private func restoreSession() {
+        guard AppDelegate.restoreEnabled else { return }
+        for w in Store.shared.loadSession() where !w.tabs.isEmpty {
+            let c = BrowserWindowController()
+            windows.append(c)
+            c.restore(w)
+            if c.tabs.isEmpty { windows.removeLast(); continue }
+            c.window?.makeKeyAndOrderFront(nil)
+        }
+    }
+
+    /// Opens a URL from the library or a menu in the frontmost browser window.
+    func open(_ url: URL) {
+        if let c = windows.first(where: { $0.window?.isMainWindow == true }) ?? windows.last {
+            c.openTab(url, select: true); c.window?.makeKeyAndOrderFront(nil)
+        } else { newWindow(with: url) }
+    }
+    @objc func showHistory(_ s: Any?) { LibraryWindowController.shared.show(.history) }
+    @objc func showBookmarks(_ s: Any?) { LibraryWindowController.shared.show(.bookmarks) }
+    @objc func showDownloadsList(_ s: Any?) { LibraryWindowController.shared.show(.downloads) }
+    @objc private func openMenuURL(_ i: NSMenuItem) { if let u = i.representedObject as? URL { open(u) } }
+    @objc private func openMenuBookmark(_ i: NSMenuItem) {
+        guard let k = i.representedObject as? String else { return }
+        if let c = current { c.openBookmark(k); c.window?.makeKeyAndOrderFront(nil) } else if let u = URL(string: k) { newWindow(with: u) }
+    }
+
+    /// History and Bookmarks menus list recent pages / bookmarks, rebuilt each time they open.
+    private var historyMenu: NSMenu?, bookmarksMenu: NSMenu?
+    private var historyFixed = 0, bookmarksFixed = 0
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        if menu === historyMenu {
+            while menu.items.count > historyFixed { menu.removeItem(at: historyFixed) }
+            for h in Store.shared.recentHistory(15) {
+                guard let u = URL(string: h.url) else { continue }
+                let i = NSMenuItem(title: String((h.title.isEmpty ? h.url : h.title).prefix(60)), action: #selector(openMenuURL), keyEquivalent: "")
+                i.target = self; i.representedObject = u; i.image = Favicons.shared.image(for: u)
+                menu.addItem(i)
+            }
+        } else if menu === bookmarksMenu {
+            while menu.items.count > bookmarksFixed { menu.removeItem(at: bookmarksFixed) }
+            for b in Store.shared.favorites + Store.shared.pinned {
+                let i = NSMenuItem(title: String(b.title.prefix(60)), action: #selector(openMenuBookmark), keyEquivalent: "")
+                i.target = self; i.representedObject = b.url; i.image = Favicons.shared.image(for: URL(string: b.url))
+                menu.addItem(i)
+            }
+        }
+    }
 
     /// URLs handed to us by other apps. Held until the block list is ready so the first page is already filtered,
     /// and so launching with a link opens only that link (no extra home tab).
@@ -727,7 +1138,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let a = NSAlert(); a.messageText = "Clear all browsing data?"
         a.informativeText = "Cookies, cache, and site data will be deleted. You will be signed out of websites."
         a.addButton(withTitle: "Clear"); a.addButton(withTitle: "Cancel")
+        a.informativeText = "History, cookies, cache and site data will be deleted. You will be signed out of websites. Bookmarks are kept."
         guard a.runModal() == .alertFirstButtonReturn else { return }
+        Store.shared.clearHistory()
         WKWebsiteDataStore.default().removeData(ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(), modifiedSince: .distantPast) {}
     }
 
@@ -791,6 +1204,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             item("New Private Window", #selector(newPrivateWindow), "n", [.command, .shift], target: self),
             item("Open Location…", #selector(B.focusAddress), "l"), .separator(),
             item("Close Tab", #selector(B.closeCurrentTab), "w"),
+            item("Reopen Closed Tab", #selector(B.reopenClosedTab), "t", [.command, .shift]),
             item("Close Window", #selector(NSWindow.performClose), "w", [.command, .shift]),
             item("Print…", #selector(B.printPage), "p"),
         ])
@@ -799,22 +1213,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             item("Cut", #selector(NSText.cut), "x"), item("Copy", #selector(NSText.copy), "c"),
             item("Paste", #selector(NSText.paste), "v"), item("Select All", #selector(NSText.selectAll), "a"), .separator(),
             item("Find…", #selector(B.findInPage), "f"),
+            item("Find Next", #selector(B.findNext), "g"),
+            item("Find Previous", #selector(B.findPrevious), "g", [.command, .shift]),
         ])
         _ = menu("View", [
             item("Vertical Tabs", #selector(B.toggleTabLayout), "s", [.command, .control]),
-            item("Lite Mode for This Site", #selector(B.toggleLiteMode), "l", [.command, .option]), .separator(),
+            item("Lite Mode for This Site", #selector(B.toggleLiteMode), "l", [.command, .option]),
+            item("Show Reader", #selector(B.toggleReader), "r", [.command, .shift]),
+            item("Downloads", #selector(showDownloadsList), "j", [.command, .shift], target: self), .separator(),
             item("Reload", #selector(B.reloadPage), "r"),
-            item("Reload Ignoring Cache", #selector(B.reloadIgnoringCache), "r", [.command, .shift]),
+            item("Reload Ignoring Cache", #selector(B.reloadIgnoringCache), "r", [.command, .option]),
             item("Stop", #selector(B.stopLoading), "."), .separator(),
             item("Zoom In", #selector(B.zoomIn), "+"),
             item("Zoom Out", #selector(B.zoomOut), "-"),
             item("Actual Size", #selector(B.zoomReset), "0"), .separator(),
             item("Enter Full Screen", #selector(NSWindow.toggleFullScreen), "f", [.command, .control]),
         ])
-        _ = menu("History", [
+        let hist = menu("History", [
             item("Back", #selector(B.goBack), "["),
-            item("Forward", #selector(B.goForward), "]"),
+            item("Forward", #selector(B.goForward), "]"), .separator(),
+            item("Show All History", #selector(showHistory), "y", target: self), .separator(),
         ])
+        hist.delegate = self; historyMenu = hist; historyFixed = hist.items.count
+        let marks = menu("Bookmarks", [
+            item("Pin This Page", #selector(B.togglePin), "d"),
+            item("Show All Bookmarks", #selector(showBookmarks), "b", [.command, .option], target: self),
+            item("Clear Unpinned Tabs", #selector(B.clearTabs), "k", [.command, .shift]), .separator(),
+        ])
+        marks.delegate = self; bookmarksMenu = marks; bookmarksFixed = marks.items.count
         var tabItems = [item("Next Tab", #selector(B.nextTab), "\t", .control),
                         item("Previous Tab", #selector(B.previousTab), "\t", [.control, .shift]),
                         item("Next Tab", #selector(B.nextTab), "]", [.command, .shift]),

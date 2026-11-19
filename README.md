@@ -15,7 +15,14 @@
 - No media autoplay (click to play); hidden tabs are suspended by WebKit
 
 ## Features
-Vertical tabs or top tabs (⌃⌘S), windows, private windows, address bar search (DuckDuckGo), back/forward & swipe, find in page, zoom, full screen, print, downloads (to ~/Downloads, never auto-opened), file upload, popups, JS dialogs, camera/mic with prompt, ⌘-click background tabs, ⌘1–9 / ⌃Tab.
+- **Arc-style sidebar**: favorites as icon tiles, pinned tabs, a Clear button for today's tabs, then open tabs. Pin with ⌘D or right-click a tab
+- **History & address suggestions**: bookmarks and history appear as you type; Library window (⌘Y history, ⌥⌘B bookmarks, ⇧⌘J downloads)
+- **Session restore**: tabs come back asleep, so many tabs cost almost nothing; ⇧⌘T reopens closed tabs
+- **Reader** (⇧⌘R): the article only, on paper, with no scripts
+- **Find bar** (⌘F, ⌘G / ⇧⌘G)
+- **Downloads list** with progress and Show in Finder
+
+Also: vertical tabs or top tabs (⌃⌘S), windows, private windows, address bar search (DuckDuckGo), back/forward & swipe, find in page, zoom, full screen, print, downloads (to ~/Downloads, never auto-opened), file upload, popups, JS dialogs, camera/mic with prompt, ⌘-click background tabs, ⌘1–9 / ⌃Tab.
 
 ## Security
 - App Sandbox + Hardened Runtime
@@ -24,7 +31,8 @@ Vertical tabs or top tabs (⌃⌘S), windows, private windows, address bar searc
 - Fraudulent-site warning on; Web Inspector off
 - Only http/https/about/blob/data load in the browser; other schemes need confirmation
 - No popups without a user gesture; camera/mic always prompt
-- Private windows use a non-persistent data store; "Clear Browsing Data…" menu
+- Private windows use a non-persistent data store and record no history, session or favicons; "Clear Browsing Data…" menu
+- History, bookmarks and session are local JSON files inside the app sandbox; favicons are fetched without cookies
 
 ## Install
 Download `PaperBrowser.zip` from [Releases](https://github.com/yuuyuu86/PaperBrowser/releases), move the app to Applications.
