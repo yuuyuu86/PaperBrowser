@@ -1,14 +1,14 @@
 <p align="center"><img src="docs/icon.png" width="96" alt=""></p>
 <h1 align="center">PaperBrowser</h1>
-<p align="center"><b>髪くらい軽い、神ブラウザー。</b><br>A hair-light, god-tier browser for macOS — the whole app is <b>304 KB</b>.</p>
-<p align="center"><a href="https://yuuyuu86.github.io/PaperBrowser/">Website</a> · <a href="https://github.com/yuuyuu86/PaperBrowser/releases/latest/download/PaperBrowser.zip">Download</a></p>
+<p align="center"><b>髪くらい軽い、神ブラウザー。</b><br>A hair-light, god-tier browser for macOS — the whole app is <b>464 KB</b>.</p>
+<p align="center"><a href="https://yuuyuu86.github.io/PaperBrowser/">Website</a> · <a href="https://github.com/yuuyuu86/PaperBrowser/releases/download/v0.2.0/PaperBrowser.zip">Download beta (v0.2.0)</a> · <a href="https://github.com/yuuyuu86/PaperBrowser/releases/download/v0.1.2/PaperBrowser.zip">Stable (v0.1.2)</a></p>
 
 ![PaperBrowser](docs/screenshot.png)
 
 紙(paper)・髪(hair)・神(god) — all read *kami* in Japanese.
 
 ## Why it's light
-- Uses the system WebKit instead of bundling an engine: one Swift file, zero dependencies, **304 KB app / 32 MB app process**
+- Uses the system WebKit instead of bundling an engine: two Swift files, zero dependencies, **464 KB app / ~38 MB app process**
 - Background tabs idle for 5 minutes are fully unloaded (WebKit content process exits); all hidden tabs unload on memory pressure
 - Built-in ad/tracker blocking (`Resources/blocklist.txt`, third-party requests only)
 - **Lite Mode** (leaf button or ⌥⌘L): turn JavaScript off per site for pages you only read — remembered per site, never saved for private windows
